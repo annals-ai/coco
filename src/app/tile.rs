@@ -5,6 +5,7 @@ pub mod update;
 use crate::app::{ArrowKey, Message, Move, Page};
 use crate::clipboard::ClipBoardContentType;
 use crate::config::Config;
+use crate::search;
 use crate::utils::open_settings;
 use crate::{app::apps::App, platform::default_app_paths};
 
@@ -22,15 +23,16 @@ use iced::{
 };
 use iced::{event, window};
 
+use nucleo_matcher::Matcher;
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tray_icon::TrayIcon;
 
+use std::cell::RefCell;
 use std::fs;
-use std::ops::Bound;
 use std::time::Duration;
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 /// This is a wrapper around the sender to disable dropping
 #[derive(Clone, Debug)]
@@ -41,31 +43,8 @@ impl Drop for ExtSender {
     fn drop(&mut self) {}
 }
 
-/// All the indexed apps that rustcast can search for
-#[derive(Clone, Debug)]
-struct AppIndex {
-    by_name: BTreeMap<String, App>,
-}
-
-impl AppIndex {
-    /// Search for an element in the index that starts with the provided prefix
-    fn search_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a App> + 'a {
-        self.by_name
-            .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
-            .take_while(move |(k, _)| k.starts_with(prefix))
-            .map(|(_, v)| v)
-    }
-
-    /// Factory function for creating
-    pub fn from_apps(options: Vec<App>) -> Self {
-        let mut bmap = BTreeMap::new();
-        for app in options {
-            bmap.insert(app.name_lc.clone(), app);
-        }
-
-        AppIndex { by_name: bmap }
-    }
-}
+/// Re-export AppIndex from the search module
+pub type AppIndex = search::AppIndex;
 
 /// This is the base window, and its a "Tile"
 /// Its fields are:
@@ -102,6 +81,7 @@ pub struct Tile {
     tray_icon: Option<TrayIcon>,
     sender: Option<ExtSender>,
     page: Page,
+    fuzzy_matcher: RefCell<Matcher>,
 }
 
 impl Tile {
@@ -214,12 +194,8 @@ impl Tile {
         } else {
             &AppIndex::from_apps(vec![])
         };
-        let results: Vec<App> = options
-            .search_prefix(&query)
-            .map(|x| x.to_owned())
-            .collect();
-
-        self.results = results;
+        let mut matcher = self.fuzzy_matcher.borrow_mut();
+        self.results = options.search(&query, &mut matcher);
     }
 
     /// Gets the frontmost application to focus later.

@@ -32,6 +32,7 @@ impl ClipBoardContentType {
             desc: "Clipboard Item".to_string(),
             icons: None,
             name_lc,
+            localized_name: None,
             name,
         }
     }

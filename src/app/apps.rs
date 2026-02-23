@@ -6,7 +6,7 @@ use std::path::Path;
 use iced::{
     Alignment,
     Length::Fill,
-    widget::{Button, Row, Text, container, image::Viewer, text::Wrapping},
+    widget::{Button, Row, Text, container, image, text::Wrapping},
 };
 
 use crate::{
@@ -38,6 +38,8 @@ pub struct App {
     pub icons: Option<iced::widget::image::Handle>,
     pub name: String,
     pub name_lc: String,
+    /// Optional localized name (e.g. Chinese name from zh-Hans.lproj)
+    pub localized_name: Option<String>,
 }
 
 impl PartialEq for App {
@@ -58,6 +60,7 @@ impl App {
                 icons: None,
                 name: x.to_string(),
                 name_lc: x.name().to_string(),
+                localized_name: None,
                 open_command: AppCommand::Function(Function::CopyToClipboard(
                     ClipBoardContentType::Text(x.to_string()),
                 )),
@@ -78,6 +81,7 @@ impl App {
                 )),
                 name: "Quit RustCast".to_string(),
                 name_lc: "quit".to_string(),
+                localized_name: None,
             },
             App {
                 open_command: AppCommand::Function(Function::OpenPrefPane),
@@ -87,6 +91,7 @@ impl App {
                 )),
                 name: "Open RustCast Preferences".to_string(),
                 name_lc: "settings".to_string(),
+                localized_name: None,
             },
             App {
                 open_command: AppCommand::Message(Message::SwitchToPage(Page::EmojiSearch)),
@@ -96,6 +101,7 @@ impl App {
                 )),
                 name: "Search for an Emoji".to_string(),
                 name_lc: "emoji".to_string(),
+                localized_name: None,
             },
             App {
                 open_command: AppCommand::Message(Message::SwitchToPage(Page::ClipboardHistory)),
@@ -105,6 +111,7 @@ impl App {
                 )),
                 name: "Clipboard History".to_string(),
                 name_lc: "clipboard".to_string(),
+                localized_name: None,
             },
             App {
                 open_command: AppCommand::Message(Message::ReloadConfig),
@@ -114,6 +121,7 @@ impl App {
                 )),
                 name: "Reload RustCast".to_string(),
                 name_lc: "refresh".to_string(),
+                localized_name: None,
             },
             App {
                 open_command: AppCommand::Display,
@@ -123,6 +131,7 @@ impl App {
                 )),
                 name: format!("Current RustCast Version: {app_version}"),
                 name_lc: "version".to_string(),
+                localized_name: None,
             },
         ]
     }
@@ -136,39 +145,52 @@ impl App {
     ) -> iced::Element<'static, Message> {
         let focused = focussed_id == id_num;
 
-        // Title + subtitle (Raycast style)
+        // Title + subtitle
+        let title_opacity = if focused { 1.0 } else { 0.88 };
+        let desc_opacity = if focused { 0.50 } else { 0.38 };
+
         let text_block = iced::widget::Column::new()
-            .spacing(2)
+            .spacing(1)
             .push(
                 Text::new(self.name)
                     .font(theme.font())
-                    .size(16)
+                    .size(14)
                     .wrapping(Wrapping::WordOrGlyph)
-                    .color(theme.text_color(1.0)),
+                    .color(theme.text_color(title_opacity)),
             )
             .push(
                 Text::new(self.desc)
                     .font(theme.font())
-                    .size(13)
-                    .color(theme.text_color(0.55)),
+                    .size(11)
+                    .color(theme.text_color(desc_opacity)),
             );
 
         let mut row = Row::new()
             .align_y(Alignment::Center)
             .width(Fill)
-            .spacing(10)
-            .height(50);
+            .spacing(12)
+            .height(44);
 
         if theme.show_icons
             && let Some(icon) = &self.icons
         {
             row = row.push(
-                container(Viewer::new(icon).height(40).width(40))
-                    .width(40)
-                    .height(40),
+                container(image(icon.clone()).height(32).width(32))
+                    .width(32)
+                    .height(32),
             );
         }
         row = row.push(container(text_block).width(Fill));
+
+        // Show ⏎ hint on focused row
+        if focused {
+            row = row.push(
+                Text::new("\u{23CE}")
+                    .size(13)
+                    .color(theme.text_color(0.25))
+                    .font(theme.font()),
+            );
+        }
 
         let msg = match self.open_command.clone() {
             AppCommand::Function(func) => Some(Message::RunFunction(func)),
@@ -183,12 +205,12 @@ impl App {
             .style(move |_, _| result_button_style(&theme_clone))
             .width(Fill)
             .padding(0)
-            .height(50);
+            .height(44);
 
         container(content)
             .id(format!("result-{}", id_num))
             .style(move |_| result_row_container_style(&theme, focused))
-            .padding(8)
+            .padding([4, 8])
             .width(Fill)
             .into()
     }
