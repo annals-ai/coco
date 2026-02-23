@@ -145,6 +145,7 @@ fn discover_apps(
             desc: "Application".to_string(),
             icons,
             name_lc: name.to_lowercase(),
+            localized_name: None,
             name,
         })
     })
