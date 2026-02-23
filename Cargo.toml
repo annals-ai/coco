@@ -8,7 +8,8 @@ anyhow = "1.0.100"
 arboard = "3.6.1"
 emojis = "0.8.0"
 global-hotkey = "0.7.0"
-iced = { version = "0.14.0", features = ["image", "tokio"] }
+iced = { version = "0.14.0", features = ["image", "tokio", "markdown"] }
+chrono = "0.4"
 icns = "0.3.1"
 image = "0.25.9"
 libc = "0.2.180"

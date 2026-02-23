@@ -30,7 +30,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             toggle_hotkey: "ALT+SPACE".to_string(),
-            clipboard_hotkey: None,
+            clipboard_hotkey: Some("SHIFT+SUPER+V".to_string()),
             buffer_rules: Buffer::default(),
             theme: Theme::default(),
             placeholder: String::from("Time to be productive!"),

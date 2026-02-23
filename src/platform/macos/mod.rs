@@ -2,7 +2,7 @@
 mod discovery;
 mod haptics;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use iced::wgpu::rwh::WindowHandle;
 
@@ -11,6 +11,123 @@ pub(super) use self::haptics::perform_haptic;
 
 /// Raw pointer to the blur child NSWindow, stored as usize for Send/Sync.
 static BLUR_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+/// Raw pointer to the agent blur child NSWindow.
+static AGENT_BLUR_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+// ── Double-tap Option key detection ──────────────────────────────────────
+
+/// Timestamp (ms since epoch) of last Option key release.
+static LAST_OPTION_UP: AtomicU64 = AtomicU64::new(0);
+/// Whether Option was pressed alone (no other keys in between).
+static OPTION_ALONE: AtomicBool = AtomicBool::new(false);
+/// Set to true when a double-tap is detected; polled by the subscription.
+static DOUBLE_TAP_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Maximum interval in ms between two Option key releases to count as double-tap.
+const DOUBLE_TAP_MS: u64 = 400;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Install a CGEventTap to detect double-tap Option key globally.
+/// Uses a C callback (no block needed), runs on a background thread with its own CFRunLoop.
+pub(super) fn install_double_tap_option_monitor() {
+    use std::ffi::c_void;
+
+    // CoreGraphics types
+    type CGEventRef = *mut c_void;
+    type CGEventTapProxy = *mut c_void;
+    type CGEventType = u32;
+    type CGEventMask = u64;
+    type CGEventFlags = u64;
+
+    const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
+    const K_CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x80000; // Option/Alt
+    const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x100000;
+    const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x20000;
+    const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x40000;
+
+    unsafe extern "C" {
+        fn CGEventTapCreate(
+            tap: u32, place: u32, options: u32,
+            events_of_interest: CGEventMask,
+            callback: extern "C" fn(CGEventTapProxy, CGEventType, CGEventRef, *mut c_void) -> CGEventRef,
+            user_info: *mut c_void,
+        ) -> *mut c_void; // CFMachPortRef
+        fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+        fn CFMachPortCreateRunLoopSource(allocator: *const c_void, port: *mut c_void, order: i64) -> *mut c_void;
+        fn CFRunLoopGetCurrent() -> *mut c_void;
+        fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
+        fn CFRunLoopRun();
+    }
+
+    unsafe extern "C" {
+        static kCFRunLoopCommonModes: *const c_void;
+    }
+
+    extern "C" fn tap_callback(
+        _proxy: CGEventTapProxy,
+        _type: CGEventType,
+        event: CGEventRef,
+        _user_info: *mut c_void,
+    ) -> CGEventRef {
+        if _type != K_CG_EVENT_FLAGS_CHANGED {
+            return event;
+        }
+        let flags = unsafe { CGEventGetFlags(event) };
+
+        let option_down = (flags & K_CG_EVENT_FLAG_MASK_ALTERNATE) != 0;
+        let other_mods = flags & (K_CG_EVENT_FLAG_MASK_COMMAND | K_CG_EVENT_FLAG_MASK_SHIFT | K_CG_EVENT_FLAG_MASK_CONTROL);
+        let only_option = option_down && other_mods == 0;
+
+        if only_option {
+            OPTION_ALONE.store(true, Ordering::Relaxed);
+        } else if !option_down && OPTION_ALONE.load(Ordering::Relaxed) {
+            OPTION_ALONE.store(false, Ordering::Relaxed);
+
+            let now = now_ms();
+            let last = LAST_OPTION_UP.swap(now, Ordering::Relaxed);
+
+            if last > 0 && (now - last) < DOUBLE_TAP_MS {
+                DOUBLE_TAP_FIRED.store(true, Ordering::Relaxed);
+                LAST_OPTION_UP.store(0, Ordering::Relaxed);
+            }
+        } else {
+            OPTION_ALONE.store(false, Ordering::Relaxed);
+        }
+        event
+    }
+
+    std::thread::spawn(|| unsafe {
+        let mask: CGEventMask = 1 << K_CG_EVENT_FLAGS_CHANGED;
+        let tap = CGEventTapCreate(
+            0, // kCGSessionEventTap
+            0, // kCGHeadInsertEventTap
+            1, // kCGEventTapOptionListenOnly
+            mask,
+            tap_callback,
+            std::ptr::null_mut(),
+        );
+        if tap.is_null() {
+            eprintln!("Failed to create CGEventTap (Accessibility permission needed)");
+            return;
+        }
+        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+        let rl = CFRunLoopGetCurrent();
+        CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
+        CFRunLoopRun(); // blocks forever
+    });
+}
+
+/// Check if a double-tap Option event was fired (and consume it).
+pub(super) fn poll_double_tap_option() -> bool {
+    DOUBLE_TAP_FIRED.swap(false, Ordering::Relaxed)
+}
 
 /// This sets the activation policy of the app to Accessory, allowing rustcast to be visible ontop
 /// of fullscreen apps
@@ -265,4 +382,121 @@ pub(super) fn resize_blur_window(content_height: f64, width: f64) {
 /// Clear the stored blur window pointer (call when hiding/closing main window).
 pub(super) fn clear_blur_window() {
     BLUR_WINDOW.store(0, Ordering::Relaxed);
+}
+
+// ── Agent blur child window ──────────────────────────────────────────────
+
+/// Create a blur child window for the agent chat window (same technique as main blur).
+pub(super) fn create_agent_blur_window(handle: &WindowHandle, width: f64, height: f64) {
+    use iced::wgpu::rwh::RawWindowHandle;
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_app_kit::NSView;
+
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(handle) => {
+            let ns_view = handle.ns_view.as_ptr();
+            let ns_view: Retained<NSView> =
+                unsafe { Retained::retain(ns_view.cast()) }.unwrap();
+            let parent = ns_view
+                .window()
+                .expect("view was not installed in a window");
+
+            unsafe {
+                let parent_frame: NSRect = msg_send![&*parent, frame];
+
+                let child_frame = make_rect(
+                    parent_frame.origin.x,
+                    parent_frame.origin.y,
+                    width,
+                    height,
+                );
+
+                let cls = AnyClass::get(c"NSWindow").unwrap();
+                let child: *mut AnyObject = msg_send![cls, alloc];
+                let style: usize = 0;
+                let backing: usize = 2;
+                let defer: bool = false;
+                let child: *mut AnyObject = msg_send![
+                    child,
+                    initWithContentRect: child_frame,
+                    styleMask: style,
+                    backing: backing,
+                    defer: defer
+                ];
+
+                let color_cls = AnyClass::get(c"NSColor").unwrap();
+                let clear: *mut AnyObject = msg_send![color_cls, clearColor];
+                let _: () = msg_send![child, setBackgroundColor: clear];
+                let no: bool = false;
+                let _: () = msg_send![child, setOpaque: no];
+                let _: () = msg_send![child, setHasShadow: no];
+
+                let level: isize = msg_send![&*parent, level];
+                let _: () = msg_send![child, setLevel: level];
+
+                let ve_cls = AnyClass::get(c"NSVisualEffectView").unwrap();
+                let ve: *mut AnyObject = msg_send![ve_cls, alloc];
+                let ve_frame = make_rect(0.0, 0.0, width, height);
+                let ve: *mut AnyObject = msg_send![ve, initWithFrame: ve_frame];
+
+                let _: () = msg_send![ve, setMaterial: 13_isize];
+                let _: () = msg_send![ve, setBlendingMode: 0_isize];
+                let _: () = msg_send![ve, setState: 1_isize];
+
+                let yes: bool = true;
+                let _: () = msg_send![ve, setWantsLayer: yes];
+                let layer: *mut AnyObject = msg_send![ve, layer];
+                let _: () = msg_send![layer, setCornerRadius: 12.0_f64];
+                let _: () = msg_send![layer, setMasksToBounds: yes];
+
+                let _: () = msg_send![child, setContentView: ve];
+                let _: () = msg_send![&*parent, addChildWindow: child, ordered: -1_isize];
+
+                let null: *const AnyObject = std::ptr::null();
+                let _: () = msg_send![child, orderFront: null];
+
+                AGENT_BLUR_WINDOW.store(child as usize, Ordering::Relaxed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clear the agent blur window pointer.
+pub(super) fn clear_agent_blur_window() {
+    AGENT_BLUR_WINDOW.store(0, Ordering::Relaxed);
+}
+
+// ── Permission checks ────────────────────────────────────────────────────
+
+/// Check if Accessibility (AX) permission is granted.
+pub(super) fn check_accessibility() -> bool {
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Check if Input Monitoring permission is granted.
+pub(super) fn check_input_monitoring() -> bool {
+    unsafe extern "C" {
+        fn CGPreflightListenEventAccess() -> bool;
+    }
+    unsafe { CGPreflightListenEventAccess() }
+}
+
+/// Open System Settings to the Accessibility pane.
+pub(super) fn open_accessibility_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
+/// Open System Settings to the Input Monitoring pane.
+pub(super) fn open_input_monitoring_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        .spawn();
 }

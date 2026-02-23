@@ -10,11 +10,13 @@ use iced::widget::operation::AbsoluteOffset;
 use iced::window;
 use rayon::slice::ParallelSliceMut;
 
+use crate::agent::process::spawn_claude;
+use crate::agent::types::{AgentStatus, ChatMessage, ClaudeEvent};
 use crate::app::apps::App;
 use crate::app::apps::AppCommand;
 use crate::app::default_settings;
 use crate::app::menubar::menu_icon;
-use crate::app::{Message, Page, tile::{AppIndex, Tile}};
+use crate::app::{Message, Page, agent_window_settings, tile::{AppIndex, Tile}};
 use crate::calculator::Expr;
 use crate::clipboard::ClipBoardContentType;
 use crate::commands::Function;
@@ -35,6 +37,17 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             focus_this_app();
             tile.focused = true;
             tile.visible = true;
+            // Refresh permission state each time the window is shown
+            tile.missing_accessibility = !platform::check_accessibility();
+            tile.missing_input_monitoring = !platform::check_input_monitoring();
+            tile.permissions_ok = !tile.missing_accessibility && !tile.missing_input_monitoring;
+            // Resize blur window for the current page (e.g. clipboard opened via hotkey)
+            let banner_h = permission_banner_height(tile);
+            if tile.page == Page::ClipboardHistory && !tile.clipboard_content.is_empty() {
+                platform::resize_blur_window(52.0 + banner_h + 1.0 + 360.0 + 38.0, WINDOW_WIDTH as f64);
+            } else {
+                platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
+            }
             Task::none()
         }
         Message::HideTrayIcon => {
@@ -55,8 +68,26 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::EscKeyPressed(id) => {
+            // Agent window: ESC closes it
+            if tile.agent_window_id == Some(id) {
+                tile.agent_window_id = None;
+                platform::clear_agent_blur_window();
+                return window::close(id);
+            }
+
             if tile.page == Page::EmojiSearch && !tile.query_lc.is_empty() {
                 return Task::none();
+            }
+
+            // AgentList: ESC goes back to Main
+            if tile.page == Page::AgentList {
+                tile.page = Page::Main;
+                let banner_h = permission_banner_height(tile);
+                platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
+                return Task::batch([
+                    Task::done(Message::ClearSearchQuery),
+                    Task::done(Message::ClearSearchResults),
+                ]);
             }
 
             if tile.query_lc.is_empty() {
@@ -66,7 +97,8 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 ])
             } else {
                 tile.page = Page::Main;
-                platform::resize_blur_window(52.0, WINDOW_WIDTH as f64);
+                let banner_h = permission_banner_height(tile);
+                platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
 
                 Task::batch(vec![
                     Task::done(Message::ClearSearchQuery),
@@ -85,6 +117,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             let len = match tile.page {
                 Page::ClipboardHistory => tile.clipboard_content.len() as u32,
                 Page::EmojiSearch => tile.results.len() as u32,
+                Page::AgentList => (1 + tile.agent_sessions.len()) as u32,
                 _ => tile.results.len() as u32,
             };
 
@@ -120,7 +153,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             };
 
             let quantity = match tile.page {
-                Page::Main => 52.0,
+                Page::Main | Page::AgentList => 52.0,
                 Page::ClipboardHistory => 50.,
                 Page::EmojiSearch => 5.,
             };
@@ -151,21 +184,40 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             ])
         }
 
-        Message::OpenFocused => match tile.results.get(tile.focus_id as usize) {
-            Some(App {
-                open_command: AppCommand::Function(func),
-                ..
-            }) => Task::done(Message::RunFunction(func.to_owned())),
-            Some(App {
-                open_command: AppCommand::Message(msg),
-                ..
-            }) => Task::done(msg.to_owned()),
-            Some(App {
-                open_command: AppCommand::Display,
-                ..
-            }) => Task::done(Message::ReturnFocus),
-            None => Task::none(),
-        },
+        Message::OpenFocused => {
+            if tile.page == Page::AgentList {
+                if tile.focus_id == 0 {
+                    // New conversation — use current query as prompt or empty
+                    let prompt = if tile.query.trim().is_empty() {
+                        String::new()
+                    } else {
+                        tile.query.clone()
+                    };
+                    return Task::done(Message::NewAgentSession(prompt));
+                } else {
+                    let idx = tile.focus_id as usize - 1;
+                    if let Some(session) = tile.agent_sessions.get(idx) {
+                        return Task::done(Message::AgentSessionSelected(session.session_id.clone()));
+                    }
+                    return Task::none();
+                }
+            }
+            match tile.results.get(tile.focus_id as usize) {
+                Some(App {
+                    open_command: AppCommand::Function(func),
+                    ..
+                }) => Task::done(Message::RunFunction(func.to_owned())),
+                Some(App {
+                    open_command: AppCommand::Message(msg),
+                    ..
+                }) => Task::done(msg.to_owned()),
+                Some(App {
+                    open_command: AppCommand::Display,
+                    ..
+                }) => Task::done(Message::ReturnFocus),
+                None => Task::none(),
+            }
+        }
 
         Message::ReloadConfig => {
             let new_config: Config = match toml::from_str(
@@ -230,7 +282,22 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::SwitchToPage(page) => {
-            tile.page = page;
+            tile.page = page.clone();
+            let banner_h = permission_banner_height(tile);
+            // Resize blur to match the target page content height
+            match &tile.page {
+                Page::ClipboardHistory if !tile.clipboard_content.is_empty() => {
+                    platform::resize_blur_window(52.0 + banner_h + 1.0 + 360.0 + 38.0, WINDOW_WIDTH as f64);
+                }
+                Page::AgentList => {
+                    tile.agent_sessions = crate::agent::session::list_sessions();
+                    let rows = std::cmp::min(1 + tile.agent_sessions.len(), 7) as f64;
+                    platform::resize_blur_window(52.0 + banner_h + 1.0 + rows * 52.0 + 38.0, WINDOW_WIDTH as f64);
+                }
+                _ => {
+                    platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
+                }
+            }
             Task::batch([
                 Task::done(Message::ClearSearchQuery),
                 Task::done(Message::ClearSearchResults),
@@ -259,6 +326,12 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::HideWindow(a) => {
+            // If this is the agent window, handle it separately
+            if tile.agent_window_id == Some(a) {
+                tile.agent_window_id = None;
+                platform::clear_agent_blur_window();
+                return window::close(a);
+            }
             tile.visible = false;
             tile.focused = false;
             tile.page = Page::Main;
@@ -296,6 +369,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::WindowFocusChanged(wid, focused) => {
+            // Agent window should not auto-hide on unfocus
+            if tile.agent_window_id == Some(wid) {
+                return Task::none();
+            }
             tile.focused = focused;
             if !focused {
                 Task::done(Message::HideWindow(wid)).chain(Task::done(Message::ClearSearchQuery))
@@ -306,6 +383,199 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
         Message::ClipboardHistory(content) => {
             tile.clipboard_content.insert(0, content);
+            Task::none()
+        }
+
+        Message::ToggleAgentMode => {
+            if !tile.visible {
+                // Launcher not shown: open it and switch to agent list
+                return Task::batch([
+                    open_window(),
+                    Task::done(Message::SwitchToPage(Page::AgentList)),
+                ]);
+            }
+            if tile.page == Page::AgentList {
+                tile.page = Page::Main;
+                let banner_h = permission_banner_height(tile);
+                platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
+                Task::batch([
+                    Task::done(Message::ClearSearchQuery),
+                    Task::done(Message::ClearSearchResults),
+                ])
+            } else {
+                Task::done(Message::SwitchToPage(Page::AgentList))
+            }
+        }
+
+        Message::AgentSessionSelected(sid) => {
+            // Resume an existing session: open agent window and spawn claude --resume
+            tile.agent_messages.clear();
+            tile.agent_input.clear();
+            tile.agent_session_id = Some(sid.clone());
+            tile.agent_status = AgentStatus::Thinking;
+            tile.agent_markdown = iced::widget::markdown::Content::new();
+
+            let (wid, open_task) = window::open(agent_window_settings());
+            tile.agent_window_id = Some(wid);
+
+            let configure = window::run(wid, |handle| {
+                let wh = handle.window_handle().expect("Unable to get window handle");
+                crate::platform::window_config(&wh);
+                crate::platform::create_agent_blur_window(&wh, 720.0, 520.0);
+            });
+
+            // Hide the launcher
+            let hide = window::latest()
+                .map(|x| x.unwrap())
+                .map(Message::HideWindow);
+
+            // Note: we don't spawn claude here — the user needs to send a new message first.
+            // Just open the window and wait.
+            tile.agent_status = AgentStatus::Idle;
+
+            Task::batch([
+                open_task.discard().chain(configure).discard(),
+                hide,
+            ])
+        }
+
+        Message::NewAgentSession(prompt) => {
+            tile.agent_messages.clear();
+            tile.agent_input.clear();
+            tile.agent_session_id = None;
+            tile.agent_markdown = iced::widget::markdown::Content::new();
+
+            let (wid, open_task) = window::open(agent_window_settings());
+            tile.agent_window_id = Some(wid);
+
+            let configure = window::run(wid, |handle| {
+                let wh = handle.window_handle().expect("Unable to get window handle");
+                crate::platform::window_config(&wh);
+                crate::platform::create_agent_blur_window(&wh, 720.0, 520.0);
+            });
+
+            // Hide the launcher
+            let hide = window::latest()
+                .map(|x| x.unwrap())
+                .map(Message::HideWindow);
+
+            if prompt.is_empty() {
+                tile.agent_status = AgentStatus::Idle;
+                Task::batch([
+                    open_task.discard().chain(configure).discard(),
+                    hide,
+                ])
+            } else {
+                // Spawn claude immediately with the prompt
+                tile.agent_messages.push(ChatMessage::User(prompt.clone()));
+                tile.agent_messages.push(ChatMessage::Assistant(String::new()));
+                tile.agent_status = AgentStatus::Thinking;
+
+                if let Some(ref sender) = tile.sender {
+                    spawn_claude(prompt, None, sender.0.clone());
+                }
+
+                Task::batch([
+                    open_task.discard().chain(configure).discard(),
+                    hide,
+                ])
+            }
+        }
+
+        Message::AgentInput(text) => {
+            tile.agent_input = text;
+            Task::none()
+        }
+
+        Message::AgentSubmit => {
+            let input = tile.agent_input.trim().to_string();
+            if input.is_empty() {
+                return Task::none();
+            }
+
+            tile.agent_messages.push(ChatMessage::User(input.clone()));
+            tile.agent_messages.push(ChatMessage::Assistant(String::new()));
+            tile.agent_input.clear();
+            tile.agent_status = AgentStatus::Thinking;
+            tile.agent_markdown = iced::widget::markdown::Content::new();
+
+            if let Some(ref sender) = tile.sender {
+                spawn_claude(
+                    input,
+                    tile.agent_session_id.clone(),
+                    sender.0.clone(),
+                );
+            }
+
+            Task::none()
+        }
+
+        Message::AgentEvent(event) => {
+            match event {
+                ClaudeEvent::SessionStarted(sid) => {
+                    tile.agent_session_id = Some(sid);
+                    tile.agent_status = AgentStatus::Streaming;
+                }
+                ClaudeEvent::TextDelta(delta) => {
+                    tile.agent_status = AgentStatus::Streaming;
+                    if let Some(ChatMessage::Assistant(text)) = tile.agent_messages.last_mut() {
+                        text.push_str(&delta);
+                        // Incremental markdown parsing
+                        tile.agent_markdown.push_str(&delta);
+                    }
+                }
+                ClaudeEvent::ToolUse { name } => {
+                    tile.agent_status = AgentStatus::Streaming;
+                    let snippet = format!("\n\n> Running: `{}`\n\n", name);
+                    if let Some(ChatMessage::Assistant(text)) = tile.agent_messages.last_mut() {
+                        text.push_str(&snippet);
+                        tile.agent_markdown.push_str(&snippet);
+                    }
+                }
+                ClaudeEvent::ToolResult(result) => {
+                    let snippet = format!("\n```\n{}\n```\n", result);
+                    if let Some(ChatMessage::Assistant(text)) = tile.agent_messages.last_mut() {
+                        text.push_str(&snippet);
+                        tile.agent_markdown.push_str(&snippet);
+                    }
+                }
+                ClaudeEvent::Finished => {
+                    tile.agent_status = AgentStatus::Idle;
+                }
+                ClaudeEvent::Error(err) => {
+                    tile.agent_status = AgentStatus::Idle;
+                    let snippet = format!("\n\n**Error:** {}\n", err);
+                    if let Some(ChatMessage::Assistant(text)) = tile.agent_messages.last_mut() {
+                        text.push_str(&snippet);
+                        tile.agent_markdown.push_str(&snippet);
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        Message::AgentWindowClosed(wid) => {
+            if tile.agent_window_id == Some(wid) {
+                tile.agent_window_id = None;
+                platform::clear_agent_blur_window();
+            }
+            Task::none()
+        }
+
+        Message::OpenAccessibilitySettings => {
+            platform::open_accessibility_settings();
+            Task::none()
+        }
+
+        Message::OpenInputMonitoringSettings => {
+            platform::open_input_monitoring_settings();
+            Task::none()
+        }
+
+        Message::RefreshPermissions => {
+            tile.missing_accessibility = !platform::check_accessibility();
+            tile.missing_input_monitoring = !platform::check_input_monitoring();
+            tile.permissions_ok = !tile.missing_accessibility && !tile.missing_input_monitoring;
             Task::none()
         }
 
@@ -320,7 +590,8 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.query = input;
             if tile.query_lc.is_empty() && tile.page != Page::ClipboardHistory {
                 tile.results = vec![];
-                platform::resize_blur_window(52.0, WINDOW_WIDTH as f64);
+                let banner_h = permission_banner_height(tile);
+                platform::resize_blur_window(52.0 + banner_h, WINDOW_WIDTH as f64);
                 return Task::none();
             } else if tile.query_lc == "randomvar" {
                 let rand_num = rand::random_range(0..100);
@@ -470,15 +741,21 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             }
 
             let has_results_now = !tile.results.is_empty();
+            let banner_h = permission_banner_height(tile);
 
             // 2-state resize: only on 0↔non-zero transitions.
             // Resize the blur child window to match content — no wgpu flicker
             // since only the native child NSWindow is resized, not the main window.
-            let content_h = if has_results_now {
+            let content_h = if tile.page == Page::ClipboardHistory
+                && !tile.clipboard_content.is_empty()
+            {
+                // search(52) + banner + separator(1) + content(360) + footer(38)
+                52.0 + banner_h + 1.0 + 360.0 + 38.0
+            } else if has_results_now {
                 let rows = std::cmp::min(tile.results.len(), 7) as f64;
-                52.0 + 1.0 + rows * 52.0 + 38.0
+                52.0 + banner_h + 1.0 + rows * 52.0 + 38.0
             } else {
-                52.0
+                52.0 + banner_h
             };
             platform::resize_blur_window(content_h, WINDOW_WIDTH as f64);
 
@@ -489,6 +766,20 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             }
         }
     }
+}
+
+/// Calculate the total height of the permission banner area.
+/// Each missing permission contributes 28px row + 4px spacing, plus 8px padding (top+bottom).
+fn permission_banner_height(tile: &Tile) -> f64 {
+    if tile.permissions_ok {
+        return 0.0;
+    }
+    let count = tile.missing_accessibility as u32 + tile.missing_input_monitoring as u32;
+    if count == 0 {
+        return 0.0;
+    }
+    // 4px top padding + (count * 28px rows) + ((count-1) * 4px spacing) + 4px bottom padding
+    4.0 + (count as f64 * 28.0) + ((count - 1) as f64 * 4.0) + 4.0
 }
 
 fn open_window() -> Task<Message> {

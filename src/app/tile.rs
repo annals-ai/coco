@@ -2,6 +2,7 @@
 pub mod elm;
 pub mod update;
 
+use crate::agent::types::{AgentSession, AgentStatus, ChatMessage};
 use crate::app::{ArrowKey, Message, Move, Page};
 use crate::clipboard::ClipBoardContentType;
 use crate::config::Config;
@@ -61,7 +62,6 @@ pub type AppIndex = search::AppIndex;
 /// - Open Hotkey ID (`u32`) the id of the hotkey that opens the window
 /// - Clipboard Content (`Vec<`[`ClipBoardContentType`]`>`) all of the cliboard contents
 /// - Page ([`Page`]) the current page of the window (main or clipboard history)
-#[derive(Clone)]
 pub struct Tile {
     pub theme: iced::Theme,
     pub focus_id: u32,
@@ -82,6 +82,18 @@ pub struct Tile {
     sender: Option<ExtSender>,
     page: Page,
     fuzzy_matcher: RefCell<Matcher>,
+    // Agent mode fields
+    pub agent_sessions: Vec<AgentSession>,
+    pub agent_window_id: Option<window::Id>,
+    pub agent_session_id: Option<String>,
+    pub agent_messages: Vec<ChatMessage>,
+    pub agent_input: String,
+    pub agent_status: AgentStatus,
+    pub agent_markdown: iced::widget::markdown::Content,
+    // Permission state
+    pub permissions_ok: bool,
+    pub missing_accessibility: bool,
+    pub missing_input_monitoring: bool,
 }
 
 impl Tile {
@@ -123,6 +135,7 @@ impl Tile {
             Subscription::run(handle_recipient),
             Subscription::run(handle_hot_reloading),
             Subscription::run(handle_clipboard_history),
+            Subscription::run(handle_double_tap_option),
             window::close_events().map(Message::HideWindow),
             keyboard::listen().filter_map(|event| {
                 if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
@@ -187,12 +200,10 @@ impl Tile {
     /// function to handle the search query changed event.
     pub fn handle_search_query_changed(&mut self) {
         let query = self.query_lc.clone();
-        let options = if self.page == Page::Main {
-            &self.options
-        } else if self.page == Page::EmojiSearch {
-            &self.emoji_apps
-        } else {
-            &AppIndex::from_apps(vec![])
+        let options = match self.page {
+            Page::Main => &self.options,
+            Page::EmojiSearch => &self.emoji_apps,
+            _ => return, // AgentList / ClipboardHistory don't use fuzzy search
         };
         let mut matcher = self.fuzzy_matcher.borrow_mut();
         self.results = options.search(&query, &mut matcher);
@@ -279,6 +290,19 @@ fn handle_hotkeys() -> impl futures::Stream<Item = Message> {
                 output.try_send(Message::KeyPressed(event.id)).unwrap();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+}
+
+/// Poll for double-tap Option key events from the native macOS monitor.
+fn handle_double_tap_option() -> impl futures::Stream<Item = Message> {
+    use crate::platform::poll_double_tap_option;
+    stream::channel(10, async |mut output| {
+        loop {
+            if poll_double_tap_option() {
+                output.send(Message::ToggleAgentMode).await.ok();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
 }

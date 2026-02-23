@@ -42,6 +42,52 @@ pub fn clear_blur_window() {
     self::macos::clear_blur_window();
 }
 
+pub fn create_agent_blur_window(handle: &WindowHandle, width: f64, height: f64) {
+    #[cfg(target_os = "macos")]
+    self::macos::create_agent_blur_window(handle, width, height);
+}
+
+pub fn clear_agent_blur_window() {
+    #[cfg(target_os = "macos")]
+    self::macos::clear_agent_blur_window();
+}
+
+pub fn check_accessibility() -> bool {
+    #[cfg(target_os = "macos")]
+    return self::macos::check_accessibility();
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+pub fn check_input_monitoring() -> bool {
+    #[cfg(target_os = "macos")]
+    return self::macos::check_input_monitoring();
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+pub fn open_accessibility_settings() {
+    #[cfg(target_os = "macos")]
+    self::macos::open_accessibility_settings();
+}
+
+pub fn open_input_monitoring_settings() {
+    #[cfg(target_os = "macos")]
+    self::macos::open_input_monitoring_settings();
+}
+
+pub fn install_double_tap_option_monitor() {
+    #[cfg(target_os = "macos")]
+    self::macos::install_double_tap_option_monitor();
+}
+
+pub fn poll_double_tap_option() -> bool {
+    #[cfg(target_os = "macos")]
+    return self::macos::poll_double_tap_option();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// The kinds of haptic patterns that can be performed
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]

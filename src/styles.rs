@@ -195,3 +195,113 @@ pub fn footer_shortcut_badge_style(_theme: &ConfigTheme) -> container::Style {
         ..Default::default()
     }
 }
+
+// ── Permission banner ─────────────────────────────────────────────────────
+
+pub fn permission_banner_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.85,
+            g: 0.55,
+            b: 0.10,
+            a: 0.15,
+        })),
+        border: Border {
+            color: Color {
+                r: 0.85,
+                g: 0.55,
+                b: 0.10,
+                a: 0.25,
+            },
+            width: 0.5,
+            radius: Radius::new(6.),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn permission_banner_button_style(_theme: &ConfigTheme) -> button::Style {
+    button::Style {
+        text_color: Color {
+            r: 1.0,
+            g: 0.78,
+            b: 0.30,
+            a: 0.95,
+        },
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: Radius::new(4.),
+        },
+        ..Default::default()
+    }
+}
+
+// ── Agent window styles ──────────────────────────────────────────────────
+
+pub fn agent_content_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.06,
+            g: 0.06,
+            b: 0.08,
+            a: 0.45,
+        })),
+        text_color: None,
+        border: Border {
+            color: with_alpha(Color::WHITE, 0.12),
+            width: 0.5,
+            radius: Radius::new(12.0),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
+pub fn user_bubble_style(theme: &ConfigTheme) -> container::Style {
+    let accent = theme.accent_color();
+    container::Style {
+        background: Some(Background::Color(with_alpha(accent, 0.25))),
+        border: Border {
+            color: with_alpha(accent, 0.35),
+            width: 0.5,
+            radius: Radius::new(12.0),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn agent_title_bar_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.20,
+        })),
+        border: Border {
+            color: with_alpha(Color::WHITE, 0.04),
+            width: 0.,
+            radius: Radius::new(12.0).bottom(0.),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn agent_input_bar_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.15,
+        })),
+        border: Border {
+            color: with_alpha(Color::WHITE, 0.04),
+            width: 0.,
+            radius: Radius::new(0.).bottom(12.),
+        },
+        ..Default::default()
+    }
+}

@@ -133,6 +133,16 @@ impl App {
                 name_lc: "version".to_string(),
                 localized_name: None,
             },
+            App {
+                open_command: AppCommand::Message(Message::SwitchToPage(Page::AgentList)),
+                desc: RUSTCAST_DESC_NAME.to_string(),
+                icons: handle_from_icns(Path::new(
+                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
+                )),
+                name: "Agent Mode".to_string(),
+                name_lc: "agent".to_string(),
+                localized_name: None,
+            },
         ]
     }
 

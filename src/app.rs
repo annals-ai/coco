@@ -1,4 +1,5 @@
 //! Main logic for the app
+use crate::agent::types::ClaudeEvent;
 use crate::commands::Function;
 use crate::{app::tile::ExtSender, clipboard::ClipBoardContentType};
 
@@ -25,6 +26,7 @@ pub enum Page {
     Main,
     ClipboardHistory,
     EmojiSearch,
+    AgentList,
 }
 
 /// The types of arrow keys
@@ -65,6 +67,16 @@ pub enum Message {
     SwitchToPage(Page),
     ClipboardHistory(ClipBoardContentType),
     ChangeFocus(ArrowKey),
+    ToggleAgentMode,
+    AgentSessionSelected(String),
+    NewAgentSession(String),
+    AgentInput(String),
+    AgentSubmit,
+    AgentEvent(ClaudeEvent),
+    AgentWindowClosed(window::Id),
+    OpenAccessibilitySettings,
+    OpenInputMonitoringSettings,
+    RefreshPermissions,
 }
 
 /// The window settings for rustcast
@@ -79,6 +91,23 @@ pub fn default_settings() -> Settings {
         size: iced::Size {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+        },
+        ..Default::default()
+    }
+}
+
+/// Window settings for the standalone agent chat window.
+pub fn agent_window_settings() -> Settings {
+    Settings {
+        resizable: true,
+        decorations: false,
+        minimizable: true,
+        level: window::Level::Normal,
+        transparent: true,
+        blur: false,
+        size: iced::Size {
+            width: 720.,
+            height: 520.,
         },
         ..Default::default()
     }
