@@ -1,5 +1,4 @@
 //! This handles the update logic for the tile (AKA rustcast's main window)
-use std::cmp::min;
 use std::fs;
 use std::path::Path;
 use std::thread;
@@ -11,21 +10,21 @@ use iced::widget::operation::AbsoluteOffset;
 use iced::window;
 use rayon::slice::ParallelSliceMut;
 
-use crate::app::WINDOW_WIDTH;
 use crate::app::apps::App;
 use crate::app::apps::AppCommand;
 use crate::app::default_settings;
 use crate::app::menubar::menu_icon;
-use crate::app::tile::AppIndex;
-use crate::app::{Message, Page, tile::Tile};
+use crate::app::{Message, Page, tile::{AppIndex, Tile}};
 use crate::calculator::Expr;
 use crate::clipboard::ClipBoardContentType;
 use crate::commands::Function;
 use crate::config::Config;
+use crate::currency_conversion;
 use crate::unit_conversion;
 use crate::utils::is_valid_url;
+use crate::app::WINDOW_WIDTH;
 use crate::{app::ArrowKey, platform::focus_this_app};
-use crate::{app::DEFAULT_WINDOW_HEIGHT, platform::perform_haptic};
+use crate::platform::{self, perform_haptic};
 use crate::{app::Move, platform::HapticPattern};
 use crate::{app::RUSTCAST_DESC_NAME, platform::get_installed_apps};
 
@@ -67,17 +66,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 ])
             } else {
                 tile.page = Page::Main;
+                platform::resize_blur_window(52.0, WINDOW_WIDTH as f64);
 
                 Task::batch(vec![
                     Task::done(Message::ClearSearchQuery),
                     Task::done(Message::ClearSearchResults),
-                    window::resize(
-                        id,
-                        iced::Size {
-                            width: WINDOW_WIDTH,
-                            height: DEFAULT_WINDOW_HEIGHT,
-                        },
-                    ),
                 ])
             }
         }
@@ -91,7 +84,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         Message::ChangeFocus(key) => {
             let len = match tile.page {
                 Page::ClipboardHistory => tile.clipboard_content.len() as u32,
-                Page::EmojiSearch => tile.emoji_apps.search_prefix(&tile.query_lc).count() as u32, // or tile.results.len()
+                Page::EmojiSearch => tile.results.len() as u32,
                 _ => tile.results.len() as u32,
             };
 
@@ -127,7 +120,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             };
 
             let quantity = match tile.page {
-                Page::Main => 66.5,
+                Page::Main => 52.0,
                 Page::ClipboardHistory => 50.,
                 Page::EmojiSearch => 5.,
             };
@@ -269,6 +262,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.visible = false;
             tile.focused = false;
             tile.page = Page::Main;
+            platform::clear_blur_window();
             Task::batch([window::close(a), Task::done(Message::ClearSearchResults)])
         }
 
@@ -315,7 +309,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::SearchQueryChanged(input, id) => {
+        Message::SearchQueryChanged(input, _id) => {
             tile.focus_id = 0;
 
             if tile.config.haptic_feedback {
@@ -324,16 +318,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
             tile.query_lc = input.trim().to_lowercase();
             tile.query = input;
-            let prev_size = tile.results.len();
             if tile.query_lc.is_empty() && tile.page != Page::ClipboardHistory {
                 tile.results = vec![];
-                return window::resize(
-                    id,
-                    iced::Size {
-                        width: WINDOW_WIDTH,
-                        height: DEFAULT_WINDOW_HEIGHT,
-                    },
-                );
+                platform::resize_blur_window(52.0, WINDOW_WIDTH as f64);
+                return Task::none();
             } else if tile.query_lc == "randomvar" {
                 let rand_num = rand::random_range(0..100);
                 tile.results = vec![App {
@@ -342,14 +330,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     icons: None,
                     name: rand_num.to_string(),
                     name_lc: String::new(),
+                    localized_name: None,
                 }];
-                return window::resize(
-                    id,
-                    iced::Size {
-                        width: WINDOW_WIDTH,
-                        height: 55. + DEFAULT_WINDOW_HEIGHT,
-                    },
-                );
+                // Don't early-return with resize; fall through to the
+                // unified resize logic at the bottom.
             } else if tile.query_lc == "67" {
                 tile.results = vec![App {
                     open_command: AppCommand::Function(Function::RandomVar(67)),
@@ -357,14 +341,8 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     icons: None,
                     name: 67.to_string(),
                     name_lc: String::new(),
+                    localized_name: None,
                 }];
-                return window::resize(
-                    id,
-                    iced::Size {
-                        width: WINDOW_WIDTH,
-                        height: 55. + DEFAULT_WINDOW_HEIGHT,
-                    },
-                );
             } else if tile.query_lc.ends_with("?") {
                 tile.results = vec![App {
                     open_command: AppCommand::Function(Function::GoogleSearch(tile.query.clone())),
@@ -372,11 +350,8 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     desc: "Web Search".to_string(),
                     name: format!("Search for: {}", tile.query),
                     name_lc: String::new(),
+                    localized_name: None,
                 }];
-                return window::resize(
-                    id,
-                    iced::Size::new(WINDOW_WIDTH, 55. + DEFAULT_WINDOW_HEIGHT),
-                );
             } else if tile.query_lc == "cbhist" {
                 tile.page = Page::ClipboardHistory
             } else if tile.query_lc == "main" {
@@ -393,6 +368,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     icons: None,
                     name: res.eval().map(|x| x.to_string()).unwrap_or("".to_string()),
                     name_lc: "".to_string(),
+                    localized_name: None,
                 });
             } else if tile.results.is_empty()
                 && let Some(conversions) = unit_conversion::convert_query(&tile.query)
@@ -418,6 +394,44 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                             icons: None,
                             name: target,
                             name_lc: String::new(),
+                            localized_name: None,
+                        }
+                    })
+                    .collect();
+            } else if tile.results.is_empty()
+                && let Some(conversions) = currency_conversion::convert_query(&tile.query)
+            {
+                tile.results = conversions
+                    .into_iter()
+                    .map(|c| {
+                        let formatted = currency_conversion::format_currency(c.target_value, c.target_code);
+                        let target_name = currency_conversion::currency_name_cn(c.target_code);
+                        let source_name = currency_conversion::currency_name_cn(c.source_code);
+                        let copy_text = formatted.clone();
+                        App {
+                            open_command: AppCommand::Function(Function::CopyToClipboard(
+                                ClipBoardContentType::Text(copy_text),
+                            )),
+                            desc: format!(
+                                "{} {}{} {} → {} · 汇率 {:.4} · {}",
+                                currency_conversion::currency_flag(c.source_code),
+                                currency_conversion::currency_symbol(c.source_code),
+                                currency_conversion::format_currency(c.source_value, c.source_code),
+                                source_name,
+                                target_name,
+                                c.rate,
+                                c.updated_at,
+                            ),
+                            icons: None,
+                            name: format!(
+                                "{} {}{} {}",
+                                currency_conversion::currency_flag(c.target_code),
+                                currency_conversion::currency_symbol(c.target_code),
+                                formatted,
+                                c.target_code,
+                            ),
+                            name_lc: String::new(),
+                            localized_name: None,
                         }
                     })
                     .collect();
@@ -428,6 +442,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     icons: None,
                     name: "Open Website: ".to_string() + &tile.query,
                     name_lc: "".to_string(),
+                    localized_name: None,
                 });
             } else if tile.query_lc.split(' ').count() > 1 {
                 tile.results.push(App {
@@ -436,6 +451,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     desc: "Web Search".to_string(),
                     name: format!("Search for: {}", tile.query),
                     name_lc: String::new(),
+                    localized_name: None,
                 });
             } else if tile.results.is_empty() && tile.query_lc == "lemon" {
                 tile.results.push(App {
@@ -446,41 +462,28 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     ))),
                     name: "Lemon".to_string(),
                     name_lc: "".to_string(),
+                    localized_name: None,
                 });
             }
             if !tile.query_lc.is_empty() && tile.page == Page::EmojiSearch {
-                tile.results = tile
-                    .emoji_apps
-                    .search_prefix("")
-                    .map(|x| x.to_owned())
-                    .collect();
+                tile.results = tile.emoji_apps.all();
             }
 
-            let new_length = tile.results.len();
-            let max_elem = min(5, new_length);
+            let has_results_now = !tile.results.is_empty();
 
-            if prev_size != new_length && tile.page != Page::ClipboardHistory {
-                Task::batch([
-                    window::resize(
-                        id,
-                        iced::Size {
-                            width: WINDOW_WIDTH,
-                            height: ((max_elem * 55) + 35 + DEFAULT_WINDOW_HEIGHT as usize) as f32,
-                        },
-                    ),
-                    Task::done(Message::ChangeFocus(ArrowKey::Left)),
-                ])
-            } else if tile.page == Page::ClipboardHistory {
-                Task::batch([
-                    window::resize(
-                        id,
-                        iced::Size {
-                            width: WINDOW_WIDTH,
-                            height: ((7 * 55) + 35 + DEFAULT_WINDOW_HEIGHT as usize) as f32,
-                        },
-                    ),
-                    Task::done(Message::ChangeFocus(ArrowKey::Left)),
-                ])
+            // 2-state resize: only on 0↔non-zero transitions.
+            // Resize the blur child window to match content — no wgpu flicker
+            // since only the native child NSWindow is resized, not the main window.
+            let content_h = if has_results_now {
+                let rows = std::cmp::min(tile.results.len(), 7) as f64;
+                52.0 + 1.0 + rows * 52.0 + 38.0
+            } else {
+                52.0
+            };
+            platform::resize_blur_window(content_h, WINDOW_WIDTH as f64);
+
+            if has_results_now {
+                Task::done(Message::ChangeFocus(ArrowKey::Left))
             } else {
                 Task::none()
             }
@@ -489,9 +492,20 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 }
 
 fn open_window() -> Task<Message> {
+    let (id, open_task) = window::open(default_settings());
+    let configure = window::run(id, |handle| {
+        let wh = handle.window_handle().expect("Unable to get window handle");
+        crate::platform::window_config(&wh);
+        crate::platform::create_blur_child_window(
+            &wh,
+            crate::app::WINDOW_WIDTH as f64,
+            52.0,
+        );
+    });
     Task::chain(
-        window::open(default_settings())
-            .1
+        open_task
+            .discard()
+            .chain(configure)
             .map(|_| Message::OpenWindow),
         operation::focus("query"),
     )

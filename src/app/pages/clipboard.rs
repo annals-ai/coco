@@ -23,7 +23,7 @@ pub fn clipboard_view(
             )
             .id("results"),
         )
-        .height(385)
+        .height(360)
         .style(move |_| result_row_container_style(&theme_clone_2, false))
         .into(),
         container(Scrollable::with_direction(
@@ -33,7 +33,7 @@ pub fn clipboard_view(
                     .map(|x| x.to_app().name_lc)
                     .unwrap_or("".to_string()),
             )
-            .height(385)
+            .height(360)
             .width(Length::Fill)
             .align_x(Alignment::Start)
             .font(theme.font())
@@ -48,6 +48,6 @@ pub fn clipboard_view(
         .width((WINDOW_WIDTH / 3.) * 2.)
         .into(),
     ]))
-    .height(280)
+    .height(360)
     .into()
 }

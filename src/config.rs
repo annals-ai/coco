@@ -48,20 +48,24 @@ impl Default for Config {
 pub struct Theme {
     pub text_color: (f32, f32, f32),
     pub background_color: (f32, f32, f32),
+    pub accent_color: (f32, f32, f32),
     pub blur: bool,
     pub show_icons: bool,
     pub show_scroll_bar: bool,
+    pub show_footer_hints: bool,
     pub font: Option<String>,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            text_color: (0.95, 0.95, 0.96),
-            background_color: (0.09, 0.09, 0.09),
-            blur: false,
+            text_color: (0.93, 0.93, 0.95),
+            background_color: (0.10, 0.10, 0.11),
+            accent_color: (0.30, 0.42, 0.85),
+            blur: true,
             show_icons: true,
-            show_scroll_bar: true,
+            show_scroll_bar: false,
+            show_footer_hints: true,
             font: None,
         }
     }
@@ -72,12 +76,7 @@ impl From<Theme> for iced::Theme {
         let palette = iced::theme::Palette {
             background: value.bg_color(),
             text: value.text_color(1.),
-            primary: iced::Color {
-                r: 0.22,
-                g: 0.55,
-                b: 0.96,
-                a: 1.0,
-            },
+            primary: value.accent_color(),
             danger: iced::Color {
                 r: 0.95,
                 g: 0.26,
@@ -102,6 +101,16 @@ impl From<Theme> for iced::Theme {
 }
 
 impl Theme {
+    /// Return the accent color in the theme config of type [`iced::Color`]
+    pub fn accent_color(&self) -> iced::Color {
+        iced::Color {
+            r: self.accent_color.0,
+            g: self.accent_color.1,
+            b: self.accent_color.2,
+            a: 1.0,
+        }
+    }
+
     /// Return the text color in the theme config of type [`iced::Color`]
     pub fn text_color(&self, opacity: f32) -> iced::Color {
         let theme = self.to_owned();
@@ -114,13 +123,10 @@ impl Theme {
     }
 
     /// Return the background color in the theme config of type [`iced::Color`]
+    /// Returns fully transparent (0,0,0,0) for the iced palette clear color,
+    /// so the window background is invisible and blur/desktop shows through.
     pub fn bg_color(&self) -> iced::Color {
-        iced::Color {
-            r: self.background_color.0,
-            g: self.background_color.1,
-            b: self.background_color.2,
-            a: 0.,
-        }
+        iced::Color::TRANSPARENT
     }
 
     /// Return the font in the theme config of type [`iced::Font`]
@@ -192,6 +198,7 @@ impl Shelly {
             icons: icon,
             name: self_clone.alias,
             name_lc: self_clone.alias_lc,
+            localized_name: None,
         }
     }
 }

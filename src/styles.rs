@@ -1,10 +1,10 @@
 use iced::border::Radius;
 use iced::widget::{button, container};
-use iced::{Background, Border, Color, widget::text_input};
+use iced::{Background, Border, Color, Shadow, widget::text_input};
 
 use crate::config::Theme as ConfigTheme;
 
-/// Helper: mix base color with white (simple “tint”)
+/// Helper: mix base color with white (simple "tint")
 pub fn tint(mut c: Color, amount: f32) -> Color {
     c.r = c.r + (1.0 - c.r) * amount;
     c.g = c.g + (1.0 - c.g) * amount;
@@ -18,96 +18,179 @@ pub fn with_alpha(mut c: Color, a: f32) -> Color {
     c
 }
 
+/// Helper: blend two colors by a factor (0.0 = all a, 1.0 = all b)
+#[allow(dead_code)]
+pub fn blend(a: Color, b: Color, factor: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * factor,
+        g: a.g + (b.g - a.g) * factor,
+        b: a.b + (b.b - a.b) * factor,
+        a: a.a + (b.a - a.a) * factor,
+    }
+}
+
+// ── Search input ──────────────────────────────────────────────────────────
+
 pub fn rustcast_text_input_style(
     theme: &ConfigTheme,
-    round_bottom_edges: bool,
+    _round_bottom_edges: bool,
 ) -> text_input::Style {
-    let base_bg = theme.bg_color();
-    let surface = with_alpha(tint(base_bg, 0.06), 1.0);
-
-    let border_color = theme.text_color(1.);
-
+    let accent = theme.accent_color();
     text_input::Style {
-        background: Background::Color(surface),
+        background: Background::Color(Color::TRANSPARENT),
         border: Border {
-            color: border_color,
-            width: 1.,
-            radius: Radius::new(15.).bottom(if round_bottom_edges { 15. } else { 0. }),
-        },
-        icon: theme.text_color(0.7),
-        placeholder: theme.text_color(0.45),
-        value: theme.text_color(1.0),
-        selection: theme.text_color(0.2),
-    }
-}
-
-pub fn contents_style(theme: &ConfigTheme) -> container::Style {
-    container::Style {
-        background: None,
-        text_color: None,
-        border: iced::Border {
-            color: theme.text_color(0.7),
-            width: 0.,
-            radius: Radius::new(14.0),
-        },
-        ..Default::default()
-    }
-}
-
-pub fn result_button_style(theme: &ConfigTheme) -> button::Style {
-    button::Style {
-        text_color: theme.text_color(1.),
-        background: Some(Background::Color(theme.bg_color())),
-        ..Default::default()
-    }
-}
-
-pub fn result_row_container_style(tile: &ConfigTheme, focused: bool) -> container::Style {
-    let base = tile.bg_color();
-    let row_bg = if focused {
-        with_alpha(tint(base, 0.10), 1.0)
-    } else {
-        with_alpha(tint(base, 0.04), 1.0)
-    };
-
-    container::Style {
-        background: Some(Background::Color(row_bg)),
-        border: Border {
-            color: tile.text_color(1.),
+            color: Color::TRANSPARENT,
             width: 0.,
             radius: Radius::new(0.),
         },
-        ..Default::default()
+        icon: theme.text_color(0.5),
+        placeholder: theme.text_color(0.30),
+        value: theme.text_color(0.95),
+        selection: with_alpha(accent, 0.30),
     }
 }
 
-pub fn emoji_button_container_style(tile_theme: &ConfigTheme, focused: bool) -> container::Style {
-    let base = tile_theme.bg_color();
-    let row_bg = if focused {
-        with_alpha(tint(base, 0.10), 1.0)
-    } else {
-        with_alpha(tint(base, 0.04), 1.0)
-    };
+// ── Main outer container ──────────────────────────────────────────────────
+// Near-transparent so macOS NSVisualEffectView shows through.
+// Thin inner glow border + subtle outer shadow create depth.
+
+pub fn contents_style(_theme: &ConfigTheme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(row_bg)),
-        text_color: Some(tile_theme.text_color(1.)),
+        // Very low alpha — the real blur comes from NSVisualEffectView behind
+        background: Some(Background::Color(Color {
+            r: 0.06,
+            g: 0.06,
+            b: 0.08,
+            a: 0.35,
+        })),
+        text_color: None,
         border: Border {
-            color: tile_theme.text_color(0.8),
+            color: with_alpha(Color::WHITE, 0.12),
+            width: 0.5,
+            radius: Radius::new(14.0),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
+// ── Result row ────────────────────────────────────────────────────────────
+
+pub fn result_button_style(theme: &ConfigTheme) -> button::Style {
+    button::Style {
+        text_color: theme.text_color(0.95),
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        border: Border {
+            color: Color::TRANSPARENT,
             width: 0.,
-            radius: Radius::new(10),
+            radius: Radius::new(8.),
         },
         ..Default::default()
     }
 }
 
-pub fn emoji_button_style(tile_theme: &ConfigTheme) -> button::Style {
+pub fn result_row_container_style(theme: &ConfigTheme, focused: bool) -> container::Style {
+    if focused {
+        let accent = theme.accent_color();
+        container::Style {
+            background: Some(Background::Color(with_alpha(accent, 0.18))),
+            border: Border {
+                color: with_alpha(accent, 0.28),
+                width: 0.5,
+                radius: Radius::new(8.),
+            },
+            ..Default::default()
+        }
+    } else {
+        container::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.,
+                radius: Radius::new(8.),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+// ── Emoji ─────────────────────────────────────────────────────────────────
+
+pub fn emoji_button_container_style(theme: &ConfigTheme, focused: bool) -> container::Style {
+    if focused {
+        let accent = theme.accent_color();
+        container::Style {
+            background: Some(Background::Color(with_alpha(accent, 0.18))),
+            text_color: Some(theme.text_color(1.)),
+            border: Border {
+                color: with_alpha(accent, 0.28),
+                width: 0.5,
+                radius: Radius::new(8.),
+            },
+            ..Default::default()
+        }
+    } else {
+        container::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            text_color: Some(theme.text_color(1.)),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.,
+                radius: Radius::new(8.),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+pub fn emoji_button_style(theme: &ConfigTheme) -> button::Style {
     button::Style {
-        background: Some(Background::Color(tint(tile_theme.bg_color(), 0.02))),
-        text_color: tile_theme.text_color(1.),
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        text_color: theme.text_color(1.),
         border: Border {
-            color: tile_theme.text_color(0.8),
-            width: 0.1,
-            radius: Radius::new(10),
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: Radius::new(8.),
+        },
+        ..Default::default()
+    }
+}
+
+// ── Separator ─────────────────────────────────────────────────────────────
+
+pub fn separator_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(with_alpha(Color::WHITE, 0.06))),
+        ..Default::default()
+    }
+}
+
+// ── Footer ────────────────────────────────────────────────────────────────
+
+pub fn footer_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.15,
+        })),
+        border: Border {
+            color: with_alpha(Color::WHITE, 0.04),
+            width: 0.,
+            radius: Radius::new(0.).bottom(14.),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn footer_shortcut_badge_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(with_alpha(Color::WHITE, 0.08))),
+        border: Border {
+            color: with_alpha(Color::WHITE, 0.10),
+            width: 0.5,
+            radius: Radius::new(4.),
         },
         ..Default::default()
     }

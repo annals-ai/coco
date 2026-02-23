@@ -9,10 +9,12 @@ pub mod tile;
 
 use iced::window::{self, Id, Settings};
 /// The default window width
-pub const WINDOW_WIDTH: f32 = 500.;
+pub const WINDOW_WIDTH: f32 = 680.;
 
-/// The default window height
-pub const DEFAULT_WINDOW_HEIGHT: f32 = 80.;
+/// Fixed window height — always this tall, inner container shrinks to content.
+/// search bar (52) + separator (1) + 7 rows (364) + footer (38) = 455
+pub const WINDOW_HEIGHT: f32 = 455.;
+
 
 /// The rustcast descriptor name to be put for all rustcast commands
 pub const RUSTCAST_DESC_NAME: &str = "Utility";
@@ -76,7 +78,7 @@ pub fn default_settings() -> Settings {
         blur: false,
         size: iced::Size {
             width: WINDOW_WIDTH,
-            height: DEFAULT_WINDOW_HEIGHT,
+            height: WINDOW_HEIGHT,
         },
         ..Default::default()
     }

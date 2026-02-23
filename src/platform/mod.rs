@@ -27,6 +27,21 @@ pub fn transform_process_to_ui_element() {
     self::macos::transform_process_to_ui_element();
 }
 
+pub fn create_blur_child_window(handle: &WindowHandle, width: f64, content_height: f64) {
+    #[cfg(target_os = "macos")]
+    self::macos::create_blur_child_window(handle, width, content_height);
+}
+
+pub fn resize_blur_window(content_height: f64, width: f64) {
+    #[cfg(target_os = "macos")]
+    self::macos::resize_blur_window(content_height, width);
+}
+
+pub fn clear_blur_window() {
+    #[cfg(target_os = "macos")]
+    self::macos::clear_blur_window();
+}
+
 /// The kinds of haptic patterns that can be performed
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]

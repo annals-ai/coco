@@ -76,8 +76,8 @@ pub fn emoji_page(
                     Background::Color(tint(clr, 0.02))
                 })
                 .border(Border {
-                    color: tile_theme.bg_color(),
-                    width: 1.,
+                    color: iced::Color::TRANSPARENT,
+                    width: 0.,
                     radius: Radius::new(0),
                 })
         })
