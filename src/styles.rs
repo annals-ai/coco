@@ -31,11 +31,7 @@ pub fn blend(a: Color, b: Color, factor: f32) -> Color {
 
 // ── Search input ──────────────────────────────────────────────────────────
 
-pub fn rustcast_text_input_style(
-    theme: &ConfigTheme,
-    _round_bottom_edges: bool,
-) -> text_input::Style {
-    let accent = theme.accent_color();
+pub fn coco_text_input_style(theme: &ConfigTheme, _round_bottom_edges: bool) -> text_input::Style {
     text_input::Style {
         background: Background::Color(Color::TRANSPARENT),
         border: Border {
@@ -43,10 +39,10 @@ pub fn rustcast_text_input_style(
             width: 0.,
             radius: Radius::new(0.),
         },
-        icon: theme.text_color(0.5),
-        placeholder: theme.text_color(0.30),
-        value: theme.text_color(0.95),
-        selection: with_alpha(accent, 0.30),
+        icon: theme.text_color(0.56),
+        placeholder: theme.text_color(0.58),
+        value: theme.text_color(0.97),
+        selection: with_alpha(Color::WHITE, 0.14),
     }
 }
 
@@ -56,20 +52,24 @@ pub fn rustcast_text_input_style(
 
 pub fn contents_style(_theme: &ConfigTheme) -> container::Style {
     container::Style {
-        // Very low alpha — the real blur comes from NSVisualEffectView behind
+        // The main content layer owns the "black glass" tone. Native macOS
+        // child window behind it provides blur only.
         background: Some(Background::Color(Color {
-            r: 0.06,
-            g: 0.06,
-            b: 0.08,
-            a: 0.35,
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.48,
         })),
         text_color: None,
         border: Border {
-            color: with_alpha(Color::WHITE, 0.12),
-            width: 0.5,
-            radius: Radius::new(14.0),
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: Radius::new(22.0),
         },
-        shadow: Shadow::default(),
+        shadow: Shadow {
+            color: Color::TRANSPARENT,
+            ..Default::default()
+        },
         snap: false,
     }
 }
@@ -89,15 +89,19 @@ pub fn result_button_style(theme: &ConfigTheme) -> button::Style {
     }
 }
 
-pub fn result_row_container_style(theme: &ConfigTheme, focused: bool) -> container::Style {
+pub fn result_row_container_style(_theme: &ConfigTheme, focused: bool) -> container::Style {
     if focused {
-        let accent = theme.accent_color();
         container::Style {
-            background: Some(Background::Color(with_alpha(accent, 0.18))),
+            background: Some(Background::Color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.085,
+            })),
             border: Border {
-                color: with_alpha(accent, 0.28),
+                color: with_alpha(Color::WHITE, 0.10),
                 width: 0.5,
-                radius: Radius::new(8.),
+                radius: Radius::new(12.0),
             },
             ..Default::default()
         }
@@ -107,7 +111,7 @@ pub fn result_row_container_style(theme: &ConfigTheme, focused: bool) -> contain
             border: Border {
                 color: Color::TRANSPARENT,
                 width: 0.,
-                radius: Radius::new(8.),
+                radius: Radius::new(12.0),
             },
             ..Default::default()
         }
@@ -120,11 +124,11 @@ pub fn emoji_button_container_style(theme: &ConfigTheme, focused: bool) -> conta
     if focused {
         let accent = theme.accent_color();
         container::Style {
-            background: Some(Background::Color(with_alpha(accent, 0.18))),
+            background: Some(Background::Color(with_alpha(accent, 0.12))),
             text_color: Some(theme.text_color(1.)),
             border: Border {
-                color: with_alpha(accent, 0.28),
-                width: 0.5,
+                color: Color::TRANSPARENT,
+                width: 0.,
                 radius: Radius::new(8.),
             },
             ..Default::default()
@@ -160,7 +164,7 @@ pub fn emoji_button_style(theme: &ConfigTheme) -> button::Style {
 
 pub fn separator_style(_theme: &ConfigTheme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(with_alpha(Color::WHITE, 0.06))),
+        background: Some(Background::Color(with_alpha(Color::WHITE, 0.17))),
         ..Default::default()
     }
 }
@@ -173,12 +177,12 @@ pub fn footer_style(_theme: &ConfigTheme) -> container::Style {
             r: 0.0,
             g: 0.0,
             b: 0.0,
-            a: 0.15,
+            a: 0.04,
         })),
         border: Border {
-            color: with_alpha(Color::WHITE, 0.04),
+            color: with_alpha(Color::WHITE, 0.03),
             width: 0.,
-            radius: Radius::new(0.).bottom(14.),
+            radius: Radius::new(0.).bottom(22.),
         },
         ..Default::default()
     }
@@ -186,11 +190,11 @@ pub fn footer_style(_theme: &ConfigTheme) -> container::Style {
 
 pub fn footer_shortcut_badge_style(_theme: &ConfigTheme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(with_alpha(Color::WHITE, 0.08))),
+        background: Some(Background::Color(with_alpha(Color::WHITE, 0.035))),
         border: Border {
-            color: with_alpha(Color::WHITE, 0.10),
+            color: with_alpha(Color::WHITE, 0.05),
             width: 0.5,
-            radius: Radius::new(4.),
+            radius: Radius::new(5.0),
         },
         ..Default::default()
     }
@@ -233,6 +237,89 @@ pub fn permission_banner_button_style(_theme: &ConfigTheme) -> button::Style {
             color: Color::TRANSPARENT,
             width: 0.,
             radius: Radius::new(4.),
+        },
+        ..Default::default()
+    }
+}
+
+// ── Section header (zero-query state) ────────────────────────────────────
+
+pub fn section_header_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        ..Default::default()
+    }
+}
+
+/// Green dot color for running apps
+pub fn running_dot_color() -> Color {
+    Color {
+        r: 0.30,
+        g: 0.85,
+        b: 0.40,
+        a: 0.90,
+    }
+}
+
+pub fn action_row_style(_theme: &ConfigTheme, focused: bool) -> container::Style {
+    if focused {
+        container::Style {
+            background: Some(Background::Color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.085,
+            })),
+            border: Border {
+                color: with_alpha(Color::WHITE, 0.10),
+                width: 0.5,
+                radius: Radius::new(8.0),
+            },
+            ..Default::default()
+        }
+    } else {
+        container::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.,
+                radius: Radius::new(8.0),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+pub fn action_separator_style() -> container::Style {
+    container::Style {
+        background: Some(Background::Color(with_alpha(Color::WHITE, 0.03))),
+        ..Default::default()
+    }
+}
+
+pub fn destructive_text_color() -> Color {
+    Color {
+        r: 0.95,
+        g: 0.30,
+        b: 0.25,
+        a: 0.95,
+    }
+}
+
+// ── Clipboard preview panel ──────────────────────────────────────────────
+
+pub fn clipboard_preview_style(_theme: &ConfigTheme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.08,
+        })),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: Radius::new(0.),
         },
         ..Default::default()
     }

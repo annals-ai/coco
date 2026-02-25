@@ -1,39 +1,39 @@
 <!-- Header -->
 <p align="center">
-  <img src="docs/icon.png" width="128" height="128" alt="RustCast icon" />
+  <img src="docs/icon.png" width="128" height="128" alt="Coco icon" />
 </p>
 
-<h1 align="center">RustCast</h1>
+<h1 align="center">Coco</h1>
 
 <p align="center">
   An open-source, Rust-powered alternative to Raycast/PowerToys — a fast popup launcher for apps, utilities, and workflows.
 </p>
 
 <p align="center">
-  <a href="https://github.com/unsecretised/rustcast/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/unsecretised/rustcast?display_name=tag&sort=semver&style=flat-square" />
+  <a href="https://github.com/unsecretised/coco/releases/latest">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/unsecretised/coco?display_name=tag&sort=semver&style=flat-square" />
   </a>
-  <a href="https://github.com/unsecretised/rustcast/releases">
-    <img alt="Downloads" src="https://img.shields.io/github/downloads/unsecretised/rustcast/total?style=flat-square" />
+  <a href="https://github.com/unsecretised/coco/releases">
+    <img alt="Downloads" src="https://img.shields.io/github/downloads/unsecretised/coco/total?style=flat-square" />
   </a>
   <a href="https://discord.gg/bDfNYPbnC5">
     <img alt="Discord" src="https://img.shields.io/discord/1463119282459119844?label=Discord&logo=discord&logoColor=white&style=flat-square" />
   </a>
-  <a href="https://github.com/unsecretised/rustcast/stargazers">
-    <img alt="Stars" src="https://img.shields.io/github/stars/unsecretised/rustcast?style=flat-square" />
+  <a href="https://github.com/unsecretised/coco/stargazers">
+    <img alt="Stars" src="https://img.shields.io/github/stars/unsecretised/coco?style=flat-square" />
   </a>
-  <a href="https://github.com/unsecretised/rustcast/blob/main/LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/unsecretised/rustcast?style=flat-square" />
+  <a href="https://github.com/unsecretised/coco/blob/main/LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/unsecretised/coco?style=flat-square" />
   </a>
 </p>
 
-> RustCast, Raycast and PowerToys are productivity tools. They provide a popup
+> Coco, Raycast and PowerToys are productivity tools. They provide a popup
 > search bar that people can use to do many things, like opening apps,
 > calculators, quick-notes, etc.
 
 **Community:** https://discord.gg/bDfNYPbnC5
 
-![RustCast Demo PreRelease V1](./docs/rustcast-v0-5-0.png)
+![Coco Demo PreRelease V1](./docs/rustcast-v0-5-0.png)
 ## Installation:
 
 ### Via Homebrew:
@@ -42,7 +42,7 @@
 
 ```
 brew tap unsecretised/tap
-brew install --cask rustcast
+brew install --cask coco
 ```
 
 Then launch it via launchpad or spotlight (hopefully the last time you have to
@@ -51,30 +51,30 @@ use spotlight :) Have fun!)
 ### Via github releases
 
 1. Go to the
-   [releases page](https://github.com/unsecretised/rustcast/releases/latest)
+   [releases page](https://github.com/unsecretised/coco/releases/latest)
 2. Download the `.zip` file or `.dmg` file
-3. If `.dmg` file, open it and drag the `RustCast.app` to your `/Applications/`
+3. If `.dmg` file, open it and drag the `Coco.app` to your `/Applications/`
    (you should be guided)
-4. If `.zip` file, extract the `RustCast.app` to your `/Applications/`
+4. If `.zip` file, extract the `Coco.app` to your `/Applications/`
 
 ### Build it youself:
 
-1. Clone the repo with `git clone https://github.com/unsecretised/rustcast.git`
+1. Clone the repo with `git clone https://github.com/unsecretised/coco.git`
 1. Install `cargo bundle` with `cargo install cargo-bundle` (Requires cargo to
    be installed)
-1. Run `cargo bundle --release` to build RustCast for your system (The App Dir
-   will be available at: `target/release/bundle/osx/RustCast.app`)
-1. Move the `RustCast.app` directory to your `/Applications/` folder, and launch
-   RustCast
+1. Run `cargo bundle --release` to build Coco for your system (The App Dir
+   will be available at: `target/release/bundle/osx/Coco.app`)
+1. Move the `Coco.app` directory to your `/Applications/` folder, and launch
+   Coco
 
 ## Config:
 
 > I have a high chance of forgetting to update the config docs, but even if I
 > do, you will most likely be able to find my config and a list of the latest
 > config options easily
-> [here](https://github.com/unsecretised/rustcast-dotfiles)
+> [here](https://github.com/unsecretised/coco-dotfiles)
 
-The config file should be located at: `~/.config/rustcast/config.toml` RustCast
+The config file should be located at: `~/.config/coco/config.toml` Coco
 creates the default configuration for you, but it does use its
 [default options](docs/default.toml) Here's a full list of what all you can
 configure [The list](docs/config.toml) The blurring is still a bit wonky, and
@@ -104,7 +104,7 @@ will be fixed in the upcoming releases
 - [x] Select the options using arrow keys
 - [x] Tray icons (8/1/2026)
 - [x] Unit Conversions (19/1/2026) thanks to [Hriztam](https://github.com/hriztam)
-- [x] Emoji Searching (19/1/2026) Allows people to search for emojis through rustcast
+- [x] Emoji Searching (19/1/2026) Allows people to search for emojis through Coco
 
 ### Planned:
 
@@ -115,37 +115,37 @@ will be fixed in the upcoming releases
       [Puppeteer](https://pptr.dev/)
 - [ ] Cross platform support
 
-## RustCast wouldn't be possible without these people:
+## Coco wouldn't be possible without these people:
 
 - [Nazeofel](https://github.com/Nazeofel) - First sponsor + initiater of windows
   support
 - [Mnem42](https://github.com/mnem42) - Helped add windows support
 - [Random Scientist](https://github.com/Random-Scientist) - First ever community
-  contributor to rustcast
+  contributor to Coco
 - [Lemon](https://github.com/lemonlambda) - Sponsored me, and gave me free
   Discord Nitro
 - [Julie / Zoey](https://github.com/zoey-on-github) - Gave me amazing feedback
-  and has been using RustCast since almost the first version!
+  and has been using Coco since almost the first version!
 
 All the people who starred my repo!!
 
-Those who sponsor me also get a free easter egg inside RustCast, so if you want
+Those who sponsor me also get a free easter egg inside Coco, so if you want
 a free easter egg, a dollar is all you need!
 
 And the updated list of contributors:
 
-<a href="https://github.com/unsecretised/rustcast/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=unsecretised/rustcast" />
+<a href="https://github.com/unsecretised/coco/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=unsecretised/coco" />
 </a>
 
 ### Easter egg list:
 
 - Nazeofel (Random Variable on discord) -> led to the _randomvar_ easter egg
-- Lemon -> led to the _lemon_ easter egg that shows "lemon" on rustcast
+- Lemon -> led to the _lemon_ easter egg that shows "lemon" on Coco
 
-## If you like rustcast, consider starring it on github :)
+## If you like Coco, consider starring it on github :)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=unsecretised/rustcast&type=date&legend=top-left)](https://www.star-history.com/#unsecretised/rustcast&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=unsecretised/coco&type=date&legend=top-left)](https://www.star-history.com/#unsecretised/coco&type=date&legend=top-left)
 
 ## Motivations:
 

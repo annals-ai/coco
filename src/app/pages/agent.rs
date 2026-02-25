@@ -1,4 +1,4 @@
-use iced::widget::{Column, Text, container, space};
+use iced::widget::{Column, Text, container};
 use iced::{Alignment, Element, Length::Fill};
 
 use crate::agent::types::AgentSession;
@@ -15,13 +15,25 @@ pub fn agent_list_view(
     let mut col = Column::new().padding([2, 6]);
 
     // First row: new conversation
-    let new_row = agent_row("+ New conversation", "Start a new chat", 0, focus_id, &theme);
+    let new_row = agent_row(
+        "+ New conversation",
+        "Start a new chat",
+        0,
+        focus_id,
+        &theme,
+    );
     col = col.push(new_row);
 
     // Session rows
     for (i, session) in sessions.iter().enumerate() {
         let idx = (i + 1) as u32;
-        let row = agent_row(&session.title, &relative_time(session.last_active), idx, focus_id, &theme);
+        let row = agent_row(
+            &session.title,
+            &relative_time(session.last_active),
+            idx,
+            focus_id,
+            &theme,
+        );
         col = col.push(row);
     }
 

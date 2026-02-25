@@ -4,7 +4,7 @@ APP_BUNDLE_PATH="${APP_BUNDLE_PATH:?APP_BUNDLE_PATH not set}"
 DMG_NAME="${DMG_NAME:?DMG_NAME not set}"
 DMG_DIR="${DMG_DIR:?DMG_DIR not set}"
 
-VOLUME_NAME="Rustcast"
+VOLUME_NAME="Coco"
 STAGING_DIR="$DMG_DIR/dmg-staging"
 
 rm -rf "$STAGING_DIR"

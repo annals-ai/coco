@@ -121,8 +121,9 @@ fn extract_title(path: &PathBuf) -> Option<String> {
 
         // Truncate to first 60 chars and first line
         let first_line = text.lines().next().unwrap_or(&text);
-        let truncated = if first_line.len() > 60 {
-            format!("{}...", &first_line[..57])
+        let truncated = if first_line.chars().count() > 60 {
+            let head: String = first_line.chars().take(57).collect();
+            format!("{head}...")
         } else {
             first_line.to_string()
         };

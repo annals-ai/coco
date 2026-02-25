@@ -1,4 +1,4 @@
-//! This is the config file type definitions for rustcast
+//! This is the config file type definitions for Coco
 use std::{path::Path, sync::Arc};
 
 use iced::{Font, font::Family, theme::Custom, widget::image::Handle};
@@ -61,7 +61,7 @@ impl Default for Theme {
         Self {
             text_color: (0.93, 0.93, 0.95),
             background_color: (0.10, 0.10, 0.11),
-            accent_color: (0.30, 0.42, 0.85),
+            accent_color: (1.0, 1.0, 1.0),
             blur: true,
             show_icons: true,
             show_scroll_bar: false,
@@ -96,7 +96,7 @@ impl From<Theme> for iced::Theme {
                 a: 1.0,
             },
         };
-        iced::Theme::Custom(Arc::new(Custom::new("RustCast Theme".to_string(), palette)))
+        iced::Theme::Custom(Arc::new(Custom::new("Coco Theme".to_string(), palette)))
     }
 }
 
@@ -160,7 +160,7 @@ pub struct Buffer {
 impl Default for Buffer {
     fn default() -> Self {
         Buffer {
-            clear_on_hide: true,
+            clear_on_hide: false,
             clear_on_enter: true,
         }
     }
@@ -199,6 +199,10 @@ impl Shelly {
             name: self_clone.alias,
             name_lc: self_clone.alias_lc,
             localized_name: None,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
         }
     }
 }

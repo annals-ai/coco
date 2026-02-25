@@ -1,20 +1,23 @@
-//! This modules handles the logic for each "app" that rustcast can load
+//! This modules handles the logic for each "app" that Coco can load
 //!
-//! An "app" is effectively, one of the results that rustcast returns when you search for something
+//! An "app" is effectively, one of the results that Coco returns when you search for something
 use std::path::Path;
 
 use iced::{
     Alignment,
     Length::Fill,
+    font::Weight,
     widget::{Button, Row, Text, container, image, text::Wrapping},
 };
 
 use crate::{
-    app::{Message, Page, RUSTCAST_DESC_NAME},
+    app::{
+        COCO_DESC_NAME, Message, Page, RESULT_ICON_SIZE, RESULT_ICON_SLOT, RESULT_ROW_CONTENT_GAP,
+        RESULT_ROW_CONTENT_HEIGHT, RESULT_ROW_PADDING_X, RESULT_ROW_PADDING_Y,
+    },
     clipboard::ClipBoardContentType,
     commands::Function,
     styles::{result_button_style, result_row_container_style},
-    utils::handle_from_icns,
 };
 
 /// This tells each "App" what to do when it is clicked, whether it is a function, a message, or a display
@@ -26,9 +29,16 @@ pub enum AppCommand {
     Display,
 }
 
+/// Category for grouping apps in the zero-query state
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppCategory {
+    Running,
+    Recent,
+}
+
 /// The main app struct, that represents an "App"
 ///
-/// This struct represents a command that rustcast can perform, providing the rustcast
+/// This struct represents a command that Coco can perform, providing Coco
 /// the data needed to search for the app, to display the app in search results, and to actually
 /// "run" the app.
 #[derive(Debug, Clone)]
@@ -40,6 +50,14 @@ pub struct App {
     pub name_lc: String,
     /// Optional localized name (e.g. Chinese name from zh-Hans.lproj)
     pub localized_name: Option<String>,
+    /// Category for zero-query state grouping
+    pub category: Option<AppCategory>,
+    /// Bundle path (used for actions)
+    pub bundle_path: Option<String>,
+    /// Bundle identifier (used for actions)
+    pub bundle_id: Option<String>,
+    /// PID of the running process (if running)
+    pub pid: Option<i32>,
 }
 
 impl PartialEq for App {
@@ -52,97 +70,115 @@ impl PartialEq for App {
 }
 
 impl App {
+    /// Helper to create an App with default None fields for category/bundle_path/bundle_id/pid
+    pub fn simple(
+        open_command: AppCommand,
+        desc: String,
+        icons: Option<iced::widget::image::Handle>,
+        name: String,
+        name_lc: String,
+        localized_name: Option<String>,
+    ) -> Self {
+        Self {
+            open_command,
+            desc,
+            icons,
+            name,
+            name_lc,
+            localized_name,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        }
+    }
+}
+
+impl App {
     /// A vec of all the emojis as App structs
     pub fn emoji_apps() -> Vec<App> {
         emojis::iter()
             .filter(|x| x.unicode_version() < emojis::UnicodeVersion::new(17, 13))
-            .map(|x| App {
-                icons: None,
-                name: x.to_string(),
-                name_lc: x.name().to_string(),
-                localized_name: None,
-                open_command: AppCommand::Function(Function::CopyToClipboard(
-                    ClipBoardContentType::Text(x.to_string()),
-                )),
-                desc: x.name().to_string(),
+            .map(|x| {
+                App::simple(
+                    AppCommand::Function(Function::CopyToClipboard(ClipBoardContentType::Text(
+                        x.to_string(),
+                    ))),
+                    x.name().to_string(),
+                    None,
+                    x.to_string(),
+                    x.name().to_string(),
+                    None,
+                )
             })
             .collect()
     }
-    /// This returns the basic apps that rustcast has, such as quiting rustcast and opening preferences
+    /// This returns the basic apps that Coco has, such as quiting Coco and opening preferences
     pub fn basic_apps() -> Vec<App> {
         let app_version = option_env!("APP_VERSION").unwrap_or("Unknown Version");
+        let icon = || {
+            Some(iced::widget::image::Handle::from_path(Path::new(
+                "/Applications/Coco.app/Contents/Resources/coco_list_icon.png",
+            )))
+        };
 
         vec![
-            App {
-                open_command: AppCommand::Function(Function::Quit),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Quit RustCast".to_string(),
-                name_lc: "quit".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Function(Function::OpenPrefPane),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Open RustCast Preferences".to_string(),
-                name_lc: "settings".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Message(Message::SwitchToPage(Page::EmojiSearch)),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Search for an Emoji".to_string(),
-                name_lc: "emoji".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Message(Message::SwitchToPage(Page::ClipboardHistory)),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Clipboard History".to_string(),
-                name_lc: "clipboard".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Message(Message::ReloadConfig),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Reload RustCast".to_string(),
-                name_lc: "refresh".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Display,
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: format!("Current RustCast Version: {app_version}"),
-                name_lc: "version".to_string(),
-                localized_name: None,
-            },
-            App {
-                open_command: AppCommand::Message(Message::SwitchToPage(Page::AgentList)),
-                desc: RUSTCAST_DESC_NAME.to_string(),
-                icons: handle_from_icns(Path::new(
-                    "/Applications/Rustcast.app/Contents/Resources/icon.icns",
-                )),
-                name: "Agent Mode".to_string(),
-                name_lc: "agent".to_string(),
-                localized_name: None,
-            },
+            App::simple(
+                AppCommand::Function(Function::Quit),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Quit Coco".to_string(),
+                "quit".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Function(Function::OpenPrefPane),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Open Coco Preferences".to_string(),
+                "settings".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Message(Message::SwitchToPage(Page::EmojiSearch)),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Search for an Emoji".to_string(),
+                "emoji".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Message(Message::SwitchToPage(Page::ClipboardHistory)),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Clipboard History".to_string(),
+                "clipboard".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Message(Message::ReloadConfig),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Reload Coco".to_string(),
+                "refresh".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Display,
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                format!("Current Coco Version: {app_version}"),
+                "version".to_string(),
+                None,
+            ),
+            App::simple(
+                AppCommand::Message(Message::SwitchToPage(Page::AgentList)),
+                COCO_DESC_NAME.to_string(),
+                icon(),
+                "Agent Mode".to_string(),
+                "agent".to_string(),
+                None,
+            ),
         ]
     }
 
@@ -154,52 +190,193 @@ impl App {
         focussed_id: u32,
     ) -> iced::Element<'static, Message> {
         let focused = focussed_id == id_num;
+        let is_app_result = matches!(
+            &self.open_command,
+            AppCommand::Function(Function::OpenApp(_) | Function::ActivateApp(_))
+        );
+        let desc_is_generic = matches!(self.desc.as_str(), "Application" | "Finder" | "Utility");
+        let show_subtitle = !(is_app_result || desc_is_generic);
+        let mut title_font = theme.font();
+        title_font.weight = Weight::Semibold;
+        let title_size = if show_subtitle { 17 } else { 18 };
 
         // Title + subtitle
-        let title_opacity = if focused { 1.0 } else { 0.88 };
-        let desc_opacity = if focused { 0.50 } else { 0.38 };
+        let title_opacity = if focused { 1.00 } else { 0.96 };
+        let desc_opacity = if focused { 0.78 } else { 0.62 };
+        let title = Text::new(self.name)
+            .font(title_font)
+            .size(title_size)
+            .wrapping(Wrapping::WordOrGlyph)
+            .color(theme.text_color(title_opacity));
+        let text_block = if show_subtitle {
+            iced::widget::Column::new().spacing(1).push(title).push(
+                Text::new(self.desc)
+                    .font(theme.font())
+                    .size(12)
+                    .color(theme.text_color(desc_opacity)),
+            )
+        } else {
+            iced::widget::Column::new().spacing(0).push(title)
+        };
+
+        let mut row = Row::new()
+            .align_y(Alignment::Center)
+            .width(Fill)
+            .spacing(RESULT_ROW_CONTENT_GAP)
+            .height(RESULT_ROW_CONTENT_HEIGHT);
+
+        if theme.show_icons {
+            if let Some(icon) = &self.icons {
+                row = row.push(
+                    container(
+                        image(icon.clone())
+                            .height(RESULT_ICON_SIZE)
+                            .width(RESULT_ICON_SIZE),
+                    )
+                    .width(RESULT_ICON_SLOT)
+                    .height(RESULT_ICON_SLOT)
+                    .padding(1),
+                );
+            } else {
+                row = row.push(
+                    container(crate::icons::icon(
+                        crate::icons::APP,
+                        16.0,
+                        theme.text_color(0.55),
+                    ))
+                    .width(RESULT_ICON_SLOT)
+                    .height(RESULT_ICON_SLOT)
+                    .center_x(Fill)
+                    .center_y(Fill),
+                );
+            }
+        }
+        row = row.push(container(text_block).width(Fill));
+
+        let msg = match self.open_command.clone() {
+            AppCommand::Function(func) => Some(Message::RunFunction(func)),
+            AppCommand::Message(msg) => Some(msg),
+            AppCommand::Display => None,
+        };
+
+        let theme_clone = theme.clone();
+
+        let content = Button::new(row)
+            .on_press_maybe(msg)
+            .style(move |_, _| result_button_style(&theme_clone))
+            .width(Fill)
+            .padding(0)
+            .height(RESULT_ROW_CONTENT_HEIGHT);
+
+        container(content)
+            .id(format!("result-{}", id_num))
+            .style(move |_| result_row_container_style(&theme, focused))
+            .padding([RESULT_ROW_PADDING_Y, RESULT_ROW_PADDING_X])
+            .width(Fill)
+            .into()
+    }
+
+    /// Render with a status badge (for zero-query state: "Running" or relative time)
+    pub fn render_with_status(
+        self,
+        theme: crate::config::Theme,
+        id_num: u32,
+        focussed_id: u32,
+    ) -> iced::Element<'static, Message> {
+        use crate::styles::running_dot_color;
+
+        let focused = focussed_id == id_num;
+        let mut title_font = theme.font();
+        title_font.weight = Weight::Semibold;
+        let title_opacity = if focused { 1.00 } else { 0.96 };
+        let desc_opacity = if focused { 0.78 } else { 0.62 };
+        let title_size = 17;
+
+        // Status badge: green dot + "Running" for running apps, desc text for recent
+        let status_text = match &self.category {
+            Some(AppCategory::Running) => Some(("Running", true)),
+            Some(AppCategory::Recent) => Some((&*self.desc, false)),
+            None => None,
+        };
 
         let text_block = iced::widget::Column::new()
             .spacing(1)
             .push(
-                Text::new(self.name)
-                    .font(theme.font())
-                    .size(14)
+                Text::new(self.name.clone())
+                    .font(title_font)
+                    .size(title_size)
                     .wrapping(Wrapping::WordOrGlyph)
                     .color(theme.text_color(title_opacity)),
             )
             .push(
-                Text::new(self.desc)
-                    .font(theme.font())
-                    .size(11)
-                    .color(theme.text_color(desc_opacity)),
+                Text::new(
+                    self.bundle_path
+                        .as_deref()
+                        .unwrap_or(&self.desc)
+                        .to_string(),
+                )
+                .font(theme.font())
+                .size(12)
+                .color(theme.text_color(desc_opacity)),
             );
 
         let mut row = Row::new()
             .align_y(Alignment::Center)
             .width(Fill)
-            .spacing(12)
-            .height(44);
+            .spacing(RESULT_ROW_CONTENT_GAP)
+            .height(RESULT_ROW_CONTENT_HEIGHT);
 
-        if theme.show_icons
-            && let Some(icon) = &self.icons
-        {
-            row = row.push(
-                container(image(icon.clone()).height(32).width(32))
-                    .width(32)
-                    .height(32),
-            );
+        if theme.show_icons {
+            if let Some(icon) = &self.icons {
+                row = row.push(
+                    container(
+                        image(icon.clone())
+                            .height(RESULT_ICON_SIZE)
+                            .width(RESULT_ICON_SIZE),
+                    )
+                    .width(RESULT_ICON_SLOT)
+                    .height(RESULT_ICON_SLOT)
+                    .padding(1),
+                );
+            } else {
+                row = row.push(
+                    container(crate::icons::icon(
+                        crate::icons::APP,
+                        16.0,
+                        theme.text_color(0.55),
+                    ))
+                    .width(RESULT_ICON_SLOT)
+                    .height(RESULT_ICON_SLOT)
+                    .center_x(Fill)
+                    .center_y(Fill),
+                );
+            }
         }
         row = row.push(container(text_block).width(Fill));
 
-        // Show ⏎ hint on focused row
-        if focused {
-            row = row.push(
-                Text::new("\u{23CE}")
-                    .size(13)
-                    .color(theme.text_color(0.25))
-                    .font(theme.font()),
-            );
+        // Status badge on the right
+        if let Some((label, is_running)) = status_text {
+            if is_running {
+                let dot = crate::icons::icon(crate::icons::CIRCLE_FILL, 8.0, running_dot_color());
+                let label = Text::new(label.to_string())
+                    .size(12)
+                    .color(theme.text_color(0.58))
+                    .font(theme.font());
+                row = row.push(
+                    Row::new()
+                        .push(dot)
+                        .push(label)
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                );
+            } else {
+                row = row.push(
+                    Text::new(label.to_string())
+                        .size(12)
+                        .color(theme.text_color(0.52))
+                        .font(theme.font()),
+                );
+            }
         }
 
         let msg = match self.open_command.clone() {
@@ -215,12 +392,12 @@ impl App {
             .style(move |_, _| result_button_style(&theme_clone))
             .width(Fill)
             .padding(0)
-            .height(44);
+            .height(RESULT_ROW_CONTENT_HEIGHT);
 
         container(content)
             .id(format!("result-{}", id_num))
             .style(move |_| result_row_container_style(&theme, focused))
-            .padding([4, 8])
+            .padding([RESULT_ROW_PADDING_Y, RESULT_ROW_PADDING_X])
             .width(Fill)
             .into()
     }

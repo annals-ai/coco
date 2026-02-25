@@ -1,4 +1,4 @@
-## List of features in rustcast:
+## List of features in Coco:
 
 1. Application launching
 1. Website opening (google search + regular websites)

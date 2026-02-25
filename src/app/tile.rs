@@ -1,10 +1,11 @@
-//! This module handles the logic for the tile, AKA rustcast's main window
+//! This module handles the logic for the tile, AKA Coco's main window
 pub mod elm;
 pub mod update;
 
 use crate::agent::types::{AgentSession, AgentStatus, ChatMessage};
 use crate::app::{ArrowKey, Message, Move, Page};
 use crate::clipboard::ClipBoardContentType;
+use crate::clipboard_store::ClipboardStore;
 use crate::config::Config;
 use crate::search;
 use crate::utils::open_settings;
@@ -32,8 +33,30 @@ use tray_icon::TrayIcon;
 
 use std::cell::RefCell;
 use std::fs;
-use std::time::Duration;
 use std::path::Path;
+use std::time::Duration;
+
+macro_rules! coco_log {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/kcsx/coco_debug.log")
+        {
+            let _ = writeln!(
+                f,
+                "[{:.3}] [tile] {}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    % 10000.0,
+                format!($($arg)*)
+            );
+        }
+    }};
+}
 
 /// This is a wrapper around the sender to disable dropping
 #[derive(Clone, Debug)]
@@ -77,7 +100,8 @@ pub struct Tile {
     /// The opening hotkey
     hotkey: HotKey,
     clipboard_hotkey: Option<HotKey>,
-    clipboard_content: Vec<ClipBoardContentType>,
+    pub clipboard_store: ClipboardStore,
+    pub clipboard_filtered: Vec<usize>,
     tray_icon: Option<TrayIcon>,
     sender: Option<ExtSender>,
     page: Page,
@@ -94,12 +118,219 @@ pub struct Tile {
     pub permissions_ok: bool,
     pub missing_accessibility: bool,
     pub missing_input_monitoring: bool,
+    // Zero-query cache (built once on window open, reused on empty query)
+    pub zero_query_cache: Vec<App>,
+    // Actions overlay (⌘K)
+    pub show_actions: bool,
+    pub actions: Vec<crate::app::actions::ActionItem>,
+    pub action_focus_id: u32,
+    pub action_target_name: String,
+    // Window switcher
+    pub window_list: Vec<crate::platform::WindowInfo>,
+    // Main window ID for window::resize
+    pub main_window_id: Option<window::Id>,
+    /// The last target blur height, used to avoid redundant resizes.
+    pub target_blur_height: f64,
+    /// The last target main-window height, used to debounce wgpu resizes.
+    pub target_window_height: f64,
+    /// Last scheduled shrink target for the main window (if debounced).
+    pub pending_window_height: Option<f64>,
+    /// Monotonic token to ignore stale delayed window resize tasks.
+    pub window_resize_token: u64,
+    // ── Native show/hide animation state ──
+    pub show_animating: bool,
+    pub hide_animating: bool,
+    /// Last hotkey press instant for debouncing rapid presses.
+    pub last_hotkey_time: Option<std::time::Instant>,
+    /// Last search text edit instant (used to gate shrink resizes until idle).
+    pub last_query_edit_time: Option<std::time::Instant>,
 }
 
 impl Tile {
     /// This returns the theme of the window
     pub fn theme(&self, _: window::Id) -> Option<Theme> {
         Some(self.theme.clone())
+    }
+
+    /// Snap-resize the iced window AND blur child to match content height.
+    ///
+    /// Resizes both the iced window (so layout fills exactly) and the blur
+    /// child NSWindow (macOS child windows don't auto-resize with parent).
+    pub fn snap_resize(&mut self, target_h: f64) -> iced::Task<Message> {
+        use crate::app::{FOOTER_HEIGHT, WINDOW_WIDTH};
+        use crate::platform;
+        let search_resize_debounce_active = self.visible
+            && self.page == Page::Main
+            && !self.query_lc.is_empty()
+            && !self.hide_animating;
+        let omit_main_footer =
+            self.page == Page::Main && !self.show_actions && !self.results.is_empty();
+        let effective_target_h = if omit_main_footer && target_h > FOOTER_HEIGHT + 1.0 {
+            target_h - FOOTER_HEIGHT
+        } else {
+            target_h
+        };
+        let is_window_shrink = effective_target_h + 1.0 < self.target_window_height;
+        let window_height_changed = (self.target_window_height - effective_target_h).abs() >= 1.0;
+        coco_log!(
+            "snap_resize target={:.1} eff={:.1} win={:.1} blur={:.1} page={:?} qlen={} results={} omit_footer={} debounce={} shrink={}",
+            target_h,
+            effective_target_h,
+            self.target_window_height,
+            self.target_blur_height,
+            self.page,
+            self.query_lc.len(),
+            self.results.len(),
+            omit_main_footer,
+            search_resize_debounce_active,
+            is_window_shrink
+        );
+
+        let mut tasks: Vec<iced::Task<Message>> = Vec::new();
+
+        // Avoid resizing the wgpu-backed main NSWindow on the Main page while
+        // search results are changing. We still resize the native blur child
+        // (outer glass shell) and let the view layer clip/fill the black panel
+        // to the same visual height. This removes the resize-induced flash
+        // while preserving a dynamic visual panel height.
+        if self.page == Page::Main {
+            if (self.target_blur_height - effective_target_h).abs() >= 1.0 {
+                self.target_blur_height = effective_target_h;
+                platform::resize_blur_window(effective_target_h, WINDOW_WIDTH as f64);
+            }
+
+            if self.pending_window_height.take().is_some() {
+                self.window_resize_token = self.window_resize_token.wrapping_add(1);
+            }
+
+            // Main window only grows when needed (e.g. reopening from a small
+            // persisted height). It does not shrink during Main-page search,
+            // which is the primary source of visible flashing.
+            let desired_main_h = self.target_window_height.max(effective_target_h);
+            if (self.target_window_height - desired_main_h).abs() < 1.0 {
+                return iced::Task::none();
+            }
+
+            self.target_window_height = desired_main_h;
+            if !platform::resize_main_window_top_anchored(desired_main_h, WINDOW_WIDTH as f64) {
+                coco_log!(
+                    "snap_resize main-page fallback iced resize {:.1}",
+                    desired_main_h
+                );
+                if let Some(id) = self.main_window_id {
+                    tasks.push(window::resize::<Message>(
+                        id,
+                        iced::Size {
+                            width: WINDOW_WIDTH,
+                            height: desired_main_h as f32,
+                        },
+                    ));
+                }
+            } else {
+                coco_log!(
+                    "snap_resize main-page native top-anchored main resize applied {:.1}",
+                    desired_main_h
+                );
+            }
+
+            return if tasks.is_empty() {
+                iced::Task::none()
+            } else {
+                iced::Task::batch(tasks)
+            };
+        }
+
+        if search_resize_debounce_active && window_height_changed {
+            // Defer all height changes while the user is actively typing.
+            // The actual apply is gated in `ApplyDebouncedWindowResize` by
+            // `last_query_edit_time`, so the panel only resizes after input
+            // has been idle briefly.
+            // Keep the blur child frozen too while debouncing. Updating only
+            // the blur shell before the main iced window catches up causes a
+            // visible height "flash" during search.
+            self.pending_window_height = Some(effective_target_h);
+            self.window_resize_token = self.window_resize_token.wrapping_add(1);
+            let token = self.window_resize_token;
+            coco_log!(
+                "snap_resize defer main resize pending={:.1} token={}",
+                effective_target_h,
+                token
+            );
+            let delay_ms = 60;
+            return iced::Task::perform(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    (token, effective_target_h)
+                },
+                |(token, height)| Message::ApplyDebouncedWindowResize(token, height),
+            );
+        }
+
+        // Resize blur child immediately (native, no wgpu involvement) once
+        // we're not in the active typing-shrink freeze path.
+        if (self.target_blur_height - effective_target_h).abs() >= 1.0 {
+            self.target_blur_height = effective_target_h;
+            platform::resize_blur_window(effective_target_h, WINDOW_WIDTH as f64);
+        }
+
+        // Invalidate any pending delayed shrink once we decide to resize
+        // immediately (growth, page switch, clear query, etc.).
+        if self.pending_window_height.take().is_some() {
+            self.window_resize_token = self.window_resize_token.wrapping_add(1);
+        }
+
+        // Resize the iced window only when the target changes.
+        if (self.target_window_height - effective_target_h).abs() < 1.0 {
+            return if tasks.is_empty() {
+                iced::Task::none()
+            } else {
+                iced::Task::batch(tasks)
+            };
+        }
+
+        self.target_window_height = effective_target_h;
+        let avoid_native_main_resize_while_typing = self.visible
+            && self.page == Page::Main
+            && !self.query_lc.is_empty()
+            && !self.show_animating
+            && !self.hide_animating;
+        if avoid_native_main_resize_while_typing
+            || !platform::resize_main_window_top_anchored(effective_target_h, WINDOW_WIDTH as f64)
+        {
+            if avoid_native_main_resize_while_typing {
+                coco_log!(
+                    "snap_resize using iced main resize during typing {:.1} (avoid native stretch)",
+                    effective_target_h
+                );
+            } else {
+                coco_log!(
+                    "snap_resize native main resize unavailable -> iced resize {:.1}",
+                    effective_target_h
+                );
+            }
+            if let Some(id) = self.main_window_id {
+                tasks.push(window::resize::<Message>(
+                    id,
+                    iced::Size {
+                        width: WINDOW_WIDTH,
+                        height: effective_target_h as f32,
+                    },
+                ));
+            } else {
+                return if tasks.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::batch(tasks)
+                };
+            }
+        } else {
+            coco_log!(
+                "snap_resize native top-anchored main resize applied {:.1}",
+                effective_target_h
+            );
+        }
+
+        iced::Task::batch(tasks)
     }
 
     /// This handles the subscriptions of the window
@@ -129,6 +360,13 @@ impl Tile {
             }
             _ => None,
         });
+        let needs_anim_poll = self.show_animating || self.hide_animating;
+        let anim_completion_poll: Subscription<Message> = if needs_anim_poll {
+            Subscription::run(handle_animation_completion)
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             Subscription::run(handle_hotkeys),
             keyboard,
@@ -136,7 +374,8 @@ impl Tile {
             Subscription::run(handle_hot_reloading),
             Subscription::run(handle_clipboard_history),
             Subscription::run(handle_double_tap_option),
-            window::close_events().map(Message::HideWindow),
+            anim_completion_poll,
+            window::close_events().map(Message::AgentWindowClosed),
             keyboard::listen().filter_map(|event| {
                 if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
                     match key {
@@ -156,8 +395,14 @@ impl Tile {
                             return Some(Message::ChangeFocus(ArrowKey::Down));
                         }
                         keyboard::Key::Character(chr) => {
-                            if modifiers.command() && chr.to_string().to_lowercase() == "r" {
+                            if modifiers.command() && chr.to_string().to_lowercase() == "k" {
+                                return Some(Message::ShowActions);
+                            } else if modifiers.command() && chr.to_string().to_lowercase() == "r" {
                                 return Some(Message::ReloadConfig);
+                            } else if modifiers.command() && chr.to_string().to_lowercase() == "p" {
+                                return Some(Message::ClipboardTogglePinFocused);
+                            } else if modifiers.command() && chr.to_string().to_lowercase() == "d" {
+                                return Some(Message::ClipboardDeleteFocused);
                             } else if modifiers.command() && chr.to_string() == "," {
                                 open_settings();
                             } else {
@@ -209,6 +454,23 @@ impl Tile {
         self.results = options.search(&query, &mut matcher);
     }
 
+    /// Returns the indices of clipboard entries to display (filtered or all).
+    pub fn clipboard_display_indices(&self) -> &[usize] {
+        &self.clipboard_filtered
+    }
+
+    /// Returns the count of displayed clipboard entries.
+    pub fn clipboard_display_count(&self) -> usize {
+        self.clipboard_filtered.len()
+    }
+
+    /// Rebuild the filtered list (all entries if no search query).
+    pub fn clipboard_rebuild_filtered(&mut self) {
+        let query = self.query_lc.clone();
+        let mut matcher = self.fuzzy_matcher.borrow_mut();
+        self.clipboard_filtered = self.clipboard_store.search(&query, &mut matcher);
+    }
+
     /// Gets the frontmost application to focus later.
     pub fn capture_frontmost(&mut self) {
         use objc2_app_kit::NSWorkspace;
@@ -232,7 +494,7 @@ impl Tile {
 fn handle_hot_reloading() -> impl futures::Stream<Item = Message> {
     stream::channel(100, async |mut output| {
         let mut content = fs::read_to_string(
-            std::env::var("HOME").unwrap_or("".to_owned()) + "/.config/rustcast/config.toml",
+            std::env::var("HOME").unwrap_or("".to_owned()) + "/.config/coco/config.toml",
         )
         .unwrap_or("".to_string());
 
@@ -244,7 +506,7 @@ fn handle_hot_reloading() -> impl futures::Stream<Item = Message> {
 
         loop {
             let current_content = fs::read_to_string(
-                std::env::var("HOME").unwrap_or("".to_owned()) + "/.config/rustcast/config.toml",
+                std::env::var("HOME").unwrap_or("".to_owned()) + "/.config/coco/config.toml",
             )
             .unwrap_or("".to_string());
 
@@ -303,6 +565,22 @@ fn handle_double_tap_option() -> impl futures::Stream<Item = Message> {
                 output.send(Message::ToggleAgentMode).await.ok();
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+}
+
+/// Poll native animation completion flags on a lightweight timer.
+fn handle_animation_completion() -> impl futures::Stream<Item = Message> {
+    use crate::platform;
+    stream::channel(10, async |mut output| {
+        loop {
+            if platform::poll_hide_anim_done() {
+                output.send(Message::NativeHideComplete).await.ok();
+            }
+            if platform::poll_show_anim_done() {
+                output.send(Message::NativeShowComplete).await.ok();
+            }
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
     })
 }

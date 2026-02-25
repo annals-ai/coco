@@ -147,6 +147,10 @@ fn discover_apps(
             name_lc: name.to_lowercase(),
             localized_name: None,
             name,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
         })
     })
 }

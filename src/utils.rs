@@ -1,4 +1,4 @@
-//! This has all the utility functions that rustcast uses
+//! This has all the utility functions that Coco uses
 use std::{fs::File, io::Write, path::Path, process::exit, thread};
 
 use iced::widget::image::Handle;
@@ -8,6 +8,8 @@ use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapFormat, NSBitmapImageRep, NSImageRep, NSWorkspace};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSString, NSURL};
+
+const ICON_DECODE_TARGET_PX: u32 = 128;
 
 /// The default error log path (works only on unix systems, and must be changed for windows
 /// support)
@@ -32,9 +34,17 @@ pub(crate) fn handle_from_icns(path: &Path) -> Option<Handle> {
     let data = std::fs::read(path).ok()?;
     let family = IconFamily::read(std::io::Cursor::new(&data)).ok()?;
 
-    let icon_type = family.available_icons();
+    let icon_type = family
+        .available_icons()
+        .into_iter()
+        .filter(|t| !t.is_mask())
+        .max_by_key(|t| {
+            let w = t.pixel_width() as u64;
+            let h = t.pixel_height() as u64;
+            w * h
+        })?;
 
-    let icon = family.get_icon_with_type(*icon_type.first()?).ok()?;
+    let icon = family.get_icon_with_type(icon_type).ok()?;
     let image = RgbaImage::from_raw(
         icon.width() as u32,
         icon.height() as u32,
@@ -50,7 +60,7 @@ pub(crate) fn handle_from_icns(path: &Path) -> Option<Handle> {
 /// Load an application icon via NSWorkspace, which supports all icon formats
 /// including Asset Catalogs (.car), .icns, and custom icons.
 ///
-/// Picks the smallest available bitmap representation (≥ 64px) to avoid
+/// Picks the smallest available bitmap representation (>= target px) to avoid
 /// decoding huge 1024x1024 TIFF data. Falls back to TIFFRepresentation
 /// only if no suitable bitmap rep is found.
 pub(crate) fn icon_from_workspace(app_path: &Path) -> Option<Handle> {
@@ -58,7 +68,10 @@ pub(crate) fn icon_from_workspace(app_path: &Path) -> Option<Handle> {
     let workspace = NSWorkspace::sharedWorkspace();
     let ns_image = workspace.iconForFile(&path_str);
 
-    ns_image.setSize(CGSize { width: 64.0, height: 64.0 });
+    ns_image.setSize(CGSize {
+        width: ICON_DECODE_TARGET_PX as f64,
+        height: ICON_DECODE_TARGET_PX as f64,
+    });
 
     // Try to find a small NSBitmapImageRep directly from representations.
     let reps = ns_image.representations();
@@ -105,12 +118,17 @@ pub(crate) fn icon_from_workspace(app_path: &Path) -> Option<Handle> {
             raw[off]
         } else {
             let v = u16::from_ne_bytes([raw[off], raw[off + 1]]);
-            if is_float { (half_to_f32(v).clamp(0.0, 1.0) * 255.0) as u8 } else { (v >> 8) as u8 }
+            if is_float {
+                (half_to_f32(v).clamp(0.0, 1.0) * 255.0) as u8
+            } else {
+                (v >> 8) as u8
+            }
         }
     };
 
-    // Sample directly at target resolution (64x64) to avoid decoding all pixels.
-    const TARGET: u32 = 64;
+    // Sample directly at a retina-friendly target resolution to avoid blurry
+    // upscaling in the result list (38px logical can be ~76px physical).
+    const TARGET: u32 = ICON_DECODE_TARGET_PX;
     let out_w = TARGET.min(width);
     let out_h = TARGET.min(height);
     let px_bytes = spp * bps_bytes;
@@ -126,9 +144,19 @@ pub(crate) fn icon_from_workspace(app_path: &Path) -> Option<Handle> {
 
             let (r, g, b, a) = if spp == 4 {
                 if alpha_first {
-                    (sample(o + s), sample(o + 2 * s), sample(o + 3 * s), sample(o))
+                    (
+                        sample(o + s),
+                        sample(o + 2 * s),
+                        sample(o + 3 * s),
+                        sample(o),
+                    )
                 } else {
-                    (sample(o), sample(o + s), sample(o + 2 * s), sample(o + 3 * s))
+                    (
+                        sample(o),
+                        sample(o + s),
+                        sample(o + 2 * s),
+                        sample(o + 3 * s),
+                    )
                 }
             } else {
                 (sample(o), sample(o + s), sample(o + 2 * s), 255u8)
@@ -152,12 +180,15 @@ pub(crate) fn icon_from_workspace(app_path: &Path) -> Option<Handle> {
     Some(Handle::from_rgba(out_w, out_h, rgba_buf))
 }
 
-/// Pick the smallest NSBitmapImageRep with pixelsWide ≥ 64 from the
+/// Pick the smallest NSBitmapImageRep with pixelsWide >= target from the
 /// representations array. Returns None if no bitmap rep is found.
 fn pick_best_bitmap_rep(
     reps: &objc2_foundation::NSArray<NSImageRep>,
 ) -> Option<objc2::rc::Retained<NSBitmapImageRep>> {
-    let mut best: Option<(isize, objc2::rc::Retained<NSBitmapImageRep>)> = None;
+    let target = ICON_DECODE_TARGET_PX as isize;
+    let mut best_ge_target: Option<(isize, objc2::rc::Retained<NSBitmapImageRep>)> = None;
+    let mut best_under_target: Option<(isize, objc2::rc::Retained<NSBitmapImageRep>)> = None;
+
     for rep in reps {
         // Try to downcast NSImageRep → NSBitmapImageRep
         if let Ok(bitmap) = rep.downcast::<NSBitmapImageRep>() {
@@ -165,22 +196,21 @@ fn pick_best_bitmap_rep(
             if w <= 0 {
                 continue;
             }
-            let dominated = best.as_ref().is_some_and(|(bw, _)| *bw <= w);
-            if dominated {
-                continue;
+
+            if w >= target {
+                let replace = best_ge_target.as_ref().is_none_or(|(bw, _)| w < *bw);
+                if replace {
+                    best_ge_target = Some((w, bitmap));
+                }
+            } else {
+                let replace = best_under_target.as_ref().is_none_or(|(bw, _)| w > *bw);
+                if replace {
+                    best_under_target = Some((w, bitmap));
+                }
             }
-            // Prefer the smallest rep ≥ 64, or the largest rep if all < 64.
-            let dominated_by_threshold = w >= 64
-                && best
-                    .as_ref()
-                    .is_some_and(|(bw, _)| *bw >= 64 && *bw < w);
-            if dominated_by_threshold {
-                continue;
-            }
-            best = Some((w, bitmap));
         }
     }
-    best.map(|(_, b)| b)
+    best_ge_target.or(best_under_target).map(|(_, b)| b)
 }
 
 /// Convert IEEE 754 half-precision float (16-bit) to f32.
@@ -192,7 +222,15 @@ fn half_to_f32(h: u16) -> f32 {
         let f = (mant as f32) * (1.0 / 16777216.0); // 2^-24
         if sign == 1 { -f } else { f }
     } else if exp == 31 {
-        if mant == 0 { if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY } } else { f32::NAN }
+        if mant == 0 {
+            if sign == 1 {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            }
+        } else {
+            f32::NAN
+        }
     } else {
         f32::from_bits((sign << 31) | ((exp + 112) << 23) | (mant << 13))
     }
@@ -203,8 +241,7 @@ pub fn open_settings() {
     thread::spawn(move || {
         NSWorkspace::new().openURL(&NSURL::fileURLWithPath(
             &objc2_foundation::NSString::from_str(
-                &(std::env::var("HOME").unwrap_or("".to_string())
-                    + "/.config/rustcast/config.toml"),
+                &(std::env::var("HOME").unwrap_or("".to_string()) + "/.config/coco/config.toml"),
             ),
         ));
     });

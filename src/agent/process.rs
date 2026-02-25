@@ -1,10 +1,10 @@
-use iced::futures::channel::mpsc::Sender;
 use iced::futures::SinkExt;
+use iced::futures::channel::mpsc::Sender;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::app::Message;
 use super::types::ClaudeEvent;
+use crate::app::Message;
 
 /// Spawn a claude CLI subprocess and stream events back via the iced channel.
 ///

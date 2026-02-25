@@ -15,8 +15,8 @@ clear_on_enter = true
 text_color = [0.95, 0.95, 0.96]
 background_color = [0.09, 0.09, 0.09]
 # Background opacity should / can be omitted from 0.4.5 onwards, 
-# as rustcast doesn't support custom opacity's anymore, 
-# this field will have no effect on rustcast
+# as Coco doesn't support custom opacity's anymore, 
+# this field will have no effect on Coco
 background_opacity = 0.0
 blur = false
 show_icons = true

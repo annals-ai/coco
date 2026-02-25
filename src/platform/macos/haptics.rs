@@ -1,4 +1,4 @@
-//! This is the haptics module for rustcast
+//! This is the haptics module for Coco
 //! It is used to perform haptic feedback on the macOS platform
 //! For debugging this module, just pray and hope that it works, because even I don't fully understand
 //! how it works

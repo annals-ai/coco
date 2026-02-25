@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 
 use global_hotkey::hotkey::HotKey;
+use iced::font::Weight;
 use iced::widget::scrollable::{Anchor, Direction, Scrollbar};
 use iced::widget::text::LineHeight;
 use iced::widget::{Button, Column, Row, Scrollable, Text, container, markdown, space};
@@ -18,12 +19,12 @@ use crate::agent::types::{AgentStatus, ChatMessage};
 use crate::app::pages::emoji::emoji_page;
 use crate::app::tile::AppIndex;
 use crate::config::Theme;
-use crate::styles::{
-    agent_content_style, agent_input_bar_style, agent_title_bar_style, contents_style,
-    footer_shortcut_badge_style, footer_style, permission_banner_button_style,
-    permission_banner_style, rustcast_text_input_style, separator_style, user_bubble_style,
-};
 use crate::platform;
+use crate::styles::{
+    agent_content_style, agent_input_bar_style, agent_title_bar_style, coco_text_input_style,
+    contents_style, footer_shortcut_badge_style, footer_style, permission_banner_button_style,
+    permission_banner_style, separator_style, user_bubble_style,
+};
 use crate::{app::pages::clipboard::clipboard_view, platform::get_installed_apps};
 use crate::{
     app::{Message, Page, apps::App, default_settings, tile::Tile},
@@ -33,12 +34,20 @@ use crate::{
 
 /// Initialise the base window
 pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
+    // Clear debug log on each app launch
+    let _ = std::fs::write("/Users/kcsx/coco_debug.log", "");
+
     let (id, open) = window::open(default_settings());
 
     let open = open.discard().chain(window::run(id, |handle| {
         let wh = handle.window_handle().expect("Unable to get window handle");
         platform::window_config(&wh);
-        platform::create_blur_child_window(&wh, crate::app::WINDOW_WIDTH as f64, 52.0);
+        platform::store_main_window(&wh);
+        platform::create_blur_child_window(
+            &wh,
+            crate::app::WINDOW_WIDTH as f64,
+            crate::app::SEARCH_BAR_HEIGHT,
+        );
         transform_process_to_ui_element();
     }));
 
@@ -71,7 +80,8 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             focused: false,
             config: config.clone(),
             theme: config.theme.to_owned().into(),
-            clipboard_content: vec![],
+            clipboard_store: crate::clipboard_store::ClipboardStore::load(),
+            clipboard_filtered: Vec::new(),
             tray_icon: None,
             sender: None,
             page: Page::Main,
@@ -83,11 +93,26 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             agent_input: String::new(),
             agent_status: AgentStatus::Idle,
             agent_markdown: iced::widget::markdown::Content::new(),
-            missing_accessibility: !platform::check_accessibility(),
-            missing_input_monitoring: !platform::check_input_monitoring(),
-            permissions_ok: platform::check_accessibility() && platform::check_input_monitoring(),
+            missing_accessibility: true, // will be checked properly on OpenWindow
+            missing_input_monitoring: true,
+            permissions_ok: false,
+            zero_query_cache: Vec::new(),
+            show_actions: false,
+            actions: Vec::new(),
+            action_focus_id: 0,
+            action_target_name: String::new(),
+            window_list: Vec::new(),
+            main_window_id: Some(id),
+            target_blur_height: crate::app::SEARCH_BAR_HEIGHT,
+            target_window_height: crate::app::SEARCH_BAR_HEIGHT,
+            pending_window_height: None,
+            window_resize_token: 0,
+            show_animating: false,
+            hide_animating: false,
+            last_hotkey_time: None,
+            last_query_edit_time: None,
         },
-        Task::batch([open.map(|_| Message::OpenWindow)]),
+        Task::batch([open.map(move |_| Message::OpenWindow(Some(id)))]),
     )
 }
 
@@ -97,48 +122,54 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         return agent_window_view(tile);
     }
 
-    if !tile.visible {
+    // During hide animation, keep rendering until the animation completes
+    if !tile.visible && !tile.hide_animating {
         return space().into();
     }
 
     let round_bottom_edges = match &tile.page {
         Page::Main | Page::EmojiSearch => tile.results.is_empty(),
-        Page::ClipboardHistory => tile.clipboard_content.is_empty(),
+        Page::ClipboardHistory => tile.clipboard_display_count() == 0,
         Page::AgentList => tile.agent_sessions.is_empty(),
+        Page::WindowSwitcher => tile.window_list.is_empty(),
     };
     let theme = &tile.config.theme;
 
     // ── Search bar ────────────────────────────────────────────────────
-    let search_icon = container(
-        Text::new("\u{1F50E}\u{FE0E}") // magnifying glass, text presentation
-            .size(16)
-            .color(theme.text_color(0.35)),
-    )
+    let search_icon = container(crate::icons::icon(
+        crate::icons::SEARCH,
+        20.0,
+        theme.text_color(0.62),
+    ))
     .padding([0, 2]);
+
+    let mut search_font = theme.font();
+    search_font.weight = Weight::Semibold;
 
     let title_input = text_input(tile.config.placeholder.as_str(), &tile.query)
         .on_input(move |a| Message::SearchQueryChanged(a, wid))
         .on_paste(move |a| Message::SearchQueryChanged(a, wid))
-        .font(theme.font())
+        .font(search_font)
         .on_submit(Message::OpenFocused)
         .id("query")
         .width(Fill)
-        .size(17)
-        .line_height(LineHeight::Relative(1.4))
-        .style(move |_, _| rustcast_text_input_style(theme, round_bottom_edges))
+        .size(18)
+        .line_height(LineHeight::Relative(1.25))
+        .style(move |_, _| coco_text_input_style(theme, round_bottom_edges))
         .padding([0, 0]);
 
     let search_bar = container(
         Row::new()
             .push(search_icon)
             .push(title_input)
-            .spacing(8)
+            .spacing(10)
             .align_y(Alignment::Center)
             .width(Fill)
-            .height(52),
+            .height(42),
     )
-    .padding([0, 18])
-    .width(Fill);
+    .padding([8, 18])
+    .width(Fill)
+    .height(crate::app::SEARCH_BAR_HEIGHT as u32);
 
     // ── Scrollbar direction ───────────────────────────────────────────
     let scrollbar_direction = if theme.show_scroll_bar {
@@ -155,10 +186,10 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     // ── Results content ───────────────────────────────────────────────
     let results = if tile.page == Page::ClipboardHistory {
         clipboard_view(
-            tile.clipboard_content.clone(),
+            tile.clipboard_store.all(),
+            tile.clipboard_display_indices(),
             tile.focus_id,
-            theme.clone(),
-            tile.focus_id,
+            theme,
         )
     } else if tile.page == Page::AgentList {
         crate::app::pages::agent::agent_list_view(
@@ -166,38 +197,62 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
             tile.focus_id,
             theme.clone(),
         )
+    } else if tile.page == Page::WindowSwitcher {
+        window_switcher_view(&tile.window_list, tile.focus_id, theme)
     } else if tile.results.is_empty() {
         space().into()
     } else if tile.page == Page::EmojiSearch {
         emoji_page(theme.clone(), tile.results.clone(), tile.focus_id)
+    } else if tile.query.is_empty() && tile.results.iter().any(|a| a.category.is_some()) {
+        // Zero-query state: render with group headers
+        zero_query_results_view(&tile.results, tile.focus_id, theme)
     } else {
         container(
-            Column::from_iter(tile.results.iter().enumerate().map(|(i, app)| {
-                app.clone()
-                    .render(theme.clone(), i as u32, tile.focus_id)
-            }))
-            .padding([2, 6]),
+            Column::from_iter(
+                tile.results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, app)| app.clone().render(theme.clone(), i as u32, tile.focus_id)),
+            )
+            .padding([
+                crate::app::RESULT_LIST_PADDING_Y,
+                crate::app::RESULT_LIST_PADDING_X,
+            ]),
         )
         .into()
     };
 
     let results_count = match &tile.page {
         Page::Main => tile.results.len(),
-        Page::ClipboardHistory => tile.clipboard_content.len(),
+        Page::ClipboardHistory => tile.clipboard_display_count(),
         Page::EmojiSearch => tile.results.len(),
-        Page::AgentList => 1 + tile.agent_sessions.len(), // +1 for "New conversation"
+        Page::AgentList => 1 + tile.agent_sessions.len(),
+        Page::WindowSwitcher => tile.window_list.len(),
     };
 
     let has_results = match &tile.page {
         Page::Main | Page::EmojiSearch => !tile.results.is_empty(),
-        Page::ClipboardHistory => !tile.clipboard_content.is_empty(),
-        Page::AgentList => true, // always has at least "New conversation"
+        Page::ClipboardHistory => tile.clipboard_display_count() > 0,
+        Page::AgentList => true,
+        Page::WindowSwitcher => !tile.window_list.is_empty(),
     };
 
     let height = match tile.page {
         Page::ClipboardHistory => 360,
         Page::AgentList => std::cmp::min((1 + tile.agent_sessions.len()) * 52, 364),
-        _ => std::cmp::min(tile.results.len() * 52, 364),
+        Page::WindowSwitcher => std::cmp::min(tile.window_list.len() * 52, 364),
+        _ => {
+            // For zero-query state, account for section headers
+            let is_zero_query =
+                tile.query.is_empty() && tile.results.iter().any(|a| a.category.is_some());
+            if is_zero_query {
+                let h = crate::app::tile::update::zero_query_scrollable_height(&tile.results);
+                h.min(crate::app::MAX_RESULTS_SCROLL_HEIGHT) as usize
+            } else {
+                let max_h = crate::app::MAX_RESULTS_SCROLL_HEIGHT as usize;
+                std::cmp::min(tile.results.len() * crate::app::ROW_HEIGHT as usize, max_h)
+            }
+        }
     };
 
     let scrollable = Scrollable::with_direction(results, scrollbar_direction)
@@ -208,7 +263,7 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let theme_for_sep = theme.clone();
     let separator: Element<'_, Message> = if has_results {
         container(space().height(1).width(Fill))
-            .padding([0, 14])
+            .padding([0, 18])
             .width(Fill)
             .style(move |_| separator_style(&theme_for_sep))
             .into()
@@ -220,27 +275,48 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let banners = permission_banners(tile, theme);
 
     // ── Assembly ──────────────────────────────────────────────────────
-    let mut column = Column::new()
-        .push(search_bar)
-        .push(banners)
-        .push(separator)
-        .push(scrollable)
-        .spacing(0);
+    let mut column = Column::new().push(search_bar).push(banners).push(separator);
 
-    if has_results {
-        column = column.push(footer(theme.clone(), results_count));
+    // If actions overlay is open, show it instead of regular results
+    if tile.show_actions && !tile.actions.is_empty() {
+        column = column.push(actions_overlay_view(
+            &tile.actions,
+            &tile.action_target_name,
+            tile.action_focus_id,
+            theme,
+        ));
+        column = column.push(actions_footer(theme.clone(), tile.actions.len()));
+    } else {
+        column = column.push(scrollable);
+        if has_results {
+            if tile.page == Page::ClipboardHistory {
+                column = column.push(crate::app::pages::clipboard::clipboard_footer(
+                    theme,
+                    results_count,
+                ));
+            } else if tile.page != Page::Main {
+                column = column.push(footer(theme.clone(), results_count));
+            } else {
+                // Spotlight-style main results omit the persistent shortcut footer.
+            }
+        }
     }
+    column = column.spacing(0);
 
+    // No explicit height — iced determines natural content height.
+    // Window is resized to match, blur fills window. Always accurate.
+    // Do not apply a rectangular top-level clip here: during native scale
+    // animations it makes the rounded panel corners appear square.
+    let clipped_content = container(column).width(Fill);
     let theme_for_outer = theme.clone();
-    let inner = container(column)
-        .clip(true)
+    let visual_panel_h = (tile.target_blur_height.max(1.0)).round() as f32;
+    let inner = container(clipped_content)
         .width(Fill)
+        .height(visual_panel_h)
         .style(move |_| contents_style(&theme_for_outer));
 
-    // Outer container fills the window with transparent bg.
-    // align_top ensures the glass inner panel stays at the top;
-    // any extra window area below is fully transparent (blur shows through
-    // but no dark background), so it's invisible.
+    // Outer container fills the fixed-size window with transparent bg.
+    // align_top keeps the glass panel at the top; transparent area below is invisible.
     container(inner)
         .width(Fill)
         .align_top(Fill)
@@ -265,21 +341,26 @@ fn permission_banners<'a>(tile: &Tile, theme: &crate::config::Theme) -> Element<
         let theme_for_btn = theme.clone();
         let row = Row::new()
             .push(
-                Text::new("\u{26A0} 需要「辅助功能」权限才能正常切换应用")
-                    .size(12)
-                    .color(theme.text_color(0.75))
-                    .font(theme.font()),
+                Row::new()
+                    .push(crate::icons::icon(
+                        crate::icons::EXCLAMATION_TRIANGLE,
+                        12.0,
+                        theme.text_color(0.75),
+                    ))
+                    .push(
+                        Text::new(" 需要「辅助功能」权限才能正常切换应用")
+                            .size(12)
+                            .color(theme.text_color(0.75))
+                            .font(theme.font()),
+                    )
+                    .align_y(Alignment::Center),
             )
             .push(space().width(Fill))
             .push(
-                Button::new(
-                    Text::new("前往设置 →")
-                        .size(12)
-                        .font(theme.font()),
-                )
-                .on_press(Message::OpenAccessibilitySettings)
-                .padding([2, 8])
-                .style(move |_, _| permission_banner_button_style(&theme_for_btn)),
+                Button::new(Text::new("前往设置 →").size(12).font(theme.font()))
+                    .on_press(Message::OpenAccessibilitySettings)
+                    .padding([2, 8])
+                    .style(move |_, _| permission_banner_button_style(&theme_for_btn)),
             )
             .align_y(Alignment::Center)
             .width(Fill)
@@ -298,21 +379,26 @@ fn permission_banners<'a>(tile: &Tile, theme: &crate::config::Theme) -> Element<
         let theme_for_btn = theme.clone();
         let row = Row::new()
             .push(
-                Text::new("\u{26A0} 需要「输入监控」权限才能使用快捷键唤起")
-                    .size(12)
-                    .color(theme.text_color(0.75))
-                    .font(theme.font()),
+                Row::new()
+                    .push(crate::icons::icon(
+                        crate::icons::EXCLAMATION_TRIANGLE,
+                        12.0,
+                        theme.text_color(0.75),
+                    ))
+                    .push(
+                        Text::new(" 需要「输入监控」权限才能使用快捷键唤起")
+                            .size(12)
+                            .color(theme.text_color(0.75))
+                            .font(theme.font()),
+                    )
+                    .align_y(Alignment::Center),
             )
             .push(space().width(Fill))
             .push(
-                Button::new(
-                    Text::new("前往设置 →")
-                        .size(12)
-                        .font(theme.font()),
-                )
-                .on_press(Message::OpenInputMonitoringSettings)
-                .padding([2, 8])
-                .style(move |_, _| permission_banner_button_style(&theme_for_btn)),
+                Button::new(Text::new("前往设置 →").size(12).font(theme.font()))
+                    .on_press(Message::OpenInputMonitoringSettings)
+                    .padding([2, 8])
+                    .style(move |_, _| permission_banner_button_style(&theme_for_btn)),
             )
             .align_y(Alignment::Center)
             .width(Fill)
@@ -349,7 +435,7 @@ fn footer(theme: Theme, results_count: usize) -> Element<'static, Message> {
 
     let theme_clone = theme.clone();
 
-    let open_badge = shortcut_badge("\u{23CE}", "Open", &theme);
+    let open_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Open", &theme);
     let actions_badge = shortcut_badge("\u{2318}K", "Actions", &theme);
 
     let right = Row::new()
@@ -364,11 +450,11 @@ fn footer(theme: Theme, results_count: usize) -> Element<'static, Message> {
         .align_y(Alignment::Center)
         .width(Fill)
         .height(28)
-        .padding([0, 18]);
+        .padding([0, 16]);
 
     container(row)
         .width(Fill)
-        .padding([5, 0])
+        .padding([4, 0])
         .style(move |_| footer_style(&theme_clone))
         .into()
 }
@@ -428,9 +514,7 @@ fn agent_window_view(tile: &Tile) -> Element<'_, Message> {
                 .max_width(500)
                 .style(move |_| user_bubble_style(&theme_for_bubble));
 
-                messages_col = messages_col.push(
-                    container(bubble).width(Fill).align_right(Fill),
-                );
+                messages_col = messages_col.push(container(bubble).width(Fill).align_right(Fill));
             }
             ChatMessage::Assistant(text) => {
                 if text.is_empty() && tile.agent_status == AgentStatus::Thinking {
@@ -444,14 +528,13 @@ fn agent_window_view(tile: &Tile) -> Element<'_, Message> {
                     // Use the pre-parsed markdown Content from tile
                     let md_view: Element<'_, markdown::Uri> = markdown::view(
                         tile.agent_markdown.items(),
-                        markdown::Settings::with_style(
-                            markdown::Style::from_palette(tile.theme.palette()),
-                        ),
+                        markdown::Settings::with_style(markdown::Style::from_palette(
+                            tile.theme.palette(),
+                        )),
                     );
                     let md_mapped = md_view.map(|_url| Message::AgentSubmit);
-                    messages_col = messages_col.push(
-                        container(md_mapped).max_width(600).width(Fill),
-                    );
+                    messages_col =
+                        messages_col.push(container(md_mapped).max_width(600).width(Fill));
                 }
             }
         }
@@ -510,26 +593,334 @@ fn agent_window_view(tile: &Tile) -> Element<'_, Message> {
     .into()
 }
 
-fn shortcut_badge<'a>(key: &'a str, label: &'a str, theme: &Theme) -> Element<'a, Message> {
-    let theme_for_badge = theme.clone();
-    let badge = container(
-        Text::new(key.to_string())
-            .size(10)
-            .color(theme.text_color(0.50))
-            .font(theme.font()),
-    )
-    .padding([1, 5])
-    .style(move |_| footer_shortcut_badge_style(&theme_for_badge));
+// ── Window Switcher view ──────────────────────────────────────────────────
 
-    let label_text = Text::new(label.to_string())
+fn window_switcher_view<'a>(
+    windows: &[crate::platform::WindowInfo],
+    focus_id: u32,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    let mut col = Column::new().padding([
+        crate::app::RESULT_LIST_PADDING_Y,
+        crate::app::RESULT_LIST_PADDING_X,
+    ]);
+
+    for (i, win) in windows.iter().enumerate() {
+        let focused = i as u32 == focus_id;
+        let title_opacity = if focused { 1.0 } else { 0.88 };
+        let desc_opacity = if focused { 0.50 } else { 0.38 };
+
+        let text_block = Column::new()
+            .spacing(1)
+            .push(
+                Text::new(win.window_title.clone())
+                    .font(theme.font())
+                    .size(14)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .color(theme.text_color(title_opacity)),
+            )
+            .push(
+                Text::new(win.owner_name.clone())
+                    .font(theme.font())
+                    .size(11)
+                    .color(theme.text_color(desc_opacity)),
+            );
+
+        let mut row = Row::new()
+            .align_y(Alignment::Center)
+            .width(Fill)
+            .spacing(12)
+            .height(44);
+
+        if theme.show_icons {
+            if let Some(ref icon) = win.icon {
+                row = row.push(
+                    container(iced::widget::image(icon.clone()).height(32).width(32))
+                        .width(32)
+                        .height(32),
+                );
+            }
+        }
+        row = row.push(container(text_block).width(Fill));
+
+        if focused {
+            row = row.push(crate::icons::icon(
+                crate::icons::ARROW_RETURN_LEFT,
+                13.0,
+                theme.text_color(0.25),
+            ));
+        }
+
+        let pid = win.owner_pid;
+        let wid = win.window_id;
+        let theme_for_btn = theme.clone();
+        let theme_for_cont = theme.clone();
+
+        let btn = Button::new(row)
+            .on_press(Message::FocusWindow(pid, wid))
+            .style(move |_, _| crate::styles::result_button_style(&theme_for_btn))
+            .width(Fill)
+            .padding(0)
+            .height(44);
+
+        col = col.push(
+            container(btn)
+                .id(format!("result-{}", i))
+                .style(move |_| crate::styles::result_row_container_style(&theme_for_cont, focused))
+                .padding([4, 8])
+                .width(Fill),
+        );
+    }
+
+    container(col).into()
+}
+
+// ── Actions overlay view ──────────────────────────────────────────────────
+
+fn actions_overlay_view<'a>(
+    actions: &[crate::app::actions::ActionItem],
+    target_name: &str,
+    focus_id: u32,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    use crate::app::actions::ActionGroup;
+    use crate::styles::{action_row_style, action_separator_style, destructive_text_color};
+
+    let mut col = Column::new().padding([4, 6]).spacing(2);
+
+    // Header
+    col = col.push(
+        container(
+            Text::new(format!("Actions for {}", target_name))
+                .size(12)
+                .color(theme.text_color(0.50))
+                .font(theme.font()),
+        )
+        .padding([4, 10])
+        .width(Fill),
+    );
+
+    let mut last_group: Option<&ActionGroup> = None;
+
+    for (i, item) in actions.iter().enumerate() {
+        // Add separator between groups
+        if let Some(prev) = last_group {
+            if prev != &item.group {
+                let sep: Element<'a, Message> = container(space().height(1).width(Fill))
+                    .padding([2, 8])
+                    .width(Fill)
+                    .style(move |_| action_separator_style())
+                    .into();
+                col = col.push(sep);
+            }
+        }
+        last_group = Some(&item.group);
+
+        let focused = i as u32 == focus_id;
+        let theme_for_row = theme.clone();
+
+        let label_color = if item.is_destructive {
+            destructive_text_color()
+        } else {
+            theme.text_color(if focused { 1.0 } else { 0.85 })
+        };
+
+        let mut row = Row::new()
+            .align_y(Alignment::Center)
+            .width(Fill)
+            .spacing(8)
+            .height(32);
+
+        // Focus indicator
+        if focused {
+            row = row.push(
+                Text::new("\u{25B8}")
+                    .size(11)
+                    .color(theme.text_color(0.60))
+                    .font(theme.font()),
+            );
+        } else {
+            row = row.push(space().width(12));
+        }
+
+        row = row.push(
+            container(
+                Text::new(item.label.clone())
+                    .size(13)
+                    .color(label_color)
+                    .font(theme.font()),
+            )
+            .width(Fill),
+        );
+
+        // Shortcut hint
+        if let Some(shortcut) = item.shortcut {
+            row = row.push(
+                Text::new(shortcut)
+                    .size(11)
+                    .color(theme.text_color(0.30))
+                    .font(theme.font()),
+            );
+        }
+
+        let action_clone = item.action.clone();
+        let btn = Button::new(row)
+            .on_press(Message::ExecuteAction(action_clone))
+            .style(move |_, _| crate::styles::result_button_style(&theme_for_row))
+            .width(Fill)
+            .padding(0)
+            .height(32);
+
+        let theme_for_container = theme.clone();
+        col = col.push(
+            container(btn)
+                .style(move |_| action_row_style(&theme_for_container, focused))
+                .padding([1, 6])
+                .width(Fill),
+        );
+    }
+
+    let height = std::cmp::min(actions.len() * 36 + 30, 364);
+
+    Scrollable::with_direction(col, Direction::Vertical(Scrollbar::hidden()))
+        .height(height as u32)
+        .into()
+}
+
+fn actions_footer(theme: Theme, count: usize) -> Element<'static, Message> {
+    let count_text = if count == 1 {
+        "1 action".to_string()
+    } else {
+        format!("{} actions", count)
+    };
+
+    let left = Text::new(count_text)
         .size(11)
         .color(theme.text_color(0.35))
+        .font(theme.font());
+
+    let theme_clone = theme.clone();
+
+    let esc_badge = shortcut_badge("ESC", "Close", &theme);
+    let enter_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Run", &theme);
+
+    let right = Row::new()
+        .push(esc_badge)
+        .push(enter_badge)
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let row = Row::new()
+        .push(container(left).width(Fill))
+        .push(right)
+        .align_y(Alignment::Center)
+        .width(Fill)
+        .height(28)
+        .padding([0, 16]);
+
+    container(row)
+        .width(Fill)
+        .padding([4, 0])
+        .style(move |_| crate::styles::footer_style(&theme_clone))
+        .into()
+}
+
+// ── Zero-query state view ──────────────────────────────────────────────────
+
+fn zero_query_results_view<'a>(
+    results: &[crate::app::apps::App],
+    focus_id: u32,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    use crate::app::apps::AppCategory;
+    use crate::styles::section_header_style;
+
+    let mut col = Column::new().padding([
+        crate::app::RESULT_LIST_PADDING_Y,
+        crate::app::RESULT_LIST_PADDING_X,
+    ]);
+    let mut last_category: Option<&AppCategory> = None;
+
+    for (i, app) in results.iter().enumerate() {
+        // Insert group header when category changes
+        if let Some(ref cat) = app.category {
+            let should_show_header = match last_category {
+                None => true,
+                Some(prev) => prev != cat,
+            };
+            if should_show_header {
+                let header_text = match cat {
+                    AppCategory::Running => "RUNNING",
+                    AppCategory::Recent => "RECENT",
+                };
+                let theme_for_header = theme.clone();
+                let header: Element<'a, Message> = container(
+                    Text::new(header_text)
+                        .size(10)
+                        .color(theme.text_color(0.24))
+                        .font(theme.font()),
+                )
+                .padding([
+                    crate::app::ZQ_HEADER_PADDING_Y,
+                    crate::app::ZQ_HEADER_PADDING_X,
+                ])
+                .width(Fill)
+                .height(crate::app::ZQ_HEADER_HEIGHT as f32)
+                .style(move |_| section_header_style(&theme_for_header))
+                .into();
+                col = col.push(header);
+            }
+            last_category = Some(cat);
+        }
+
+        col = col.push(
+            app.clone()
+                .render_with_status(theme.clone(), i as u32, focus_id),
+        );
+    }
+
+    container(col).into()
+}
+
+fn shortcut_badge_icon<'a>(icon_char: char, label: &'a str, theme: &Theme) -> Element<'a, Message> {
+    let theme_for_badge = theme.clone();
+    let badge = container(crate::icons::icon(icon_char, 10.0, theme.text_color(0.46)))
+        .padding([1, 6])
+        .style(move |_| footer_shortcut_badge_style(&theme_for_badge));
+
+    let label_text = Text::new(label.to_string())
+        .size(10)
+        .color(theme.text_color(0.30))
         .font(theme.font());
 
     Row::new()
         .push(badge)
         .push(label_text)
-        .spacing(3)
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn shortcut_badge<'a>(key: &'a str, label: &'a str, theme: &Theme) -> Element<'a, Message> {
+    let theme_for_badge = theme.clone();
+    let badge = container(
+        Text::new(key.to_string())
+            .size(10)
+            .color(theme.text_color(0.46))
+            .font(theme.font()),
+    )
+    .padding([1, 6])
+    .style(move |_| footer_shortcut_badge_style(&theme_for_badge));
+
+    let label_text = Text::new(label.to_string())
+        .size(10)
+        .color(theme.text_color(0.30))
+        .font(theme.font());
+
+    Row::new()
+        .push(badge)
+        .push(label_text)
+        .spacing(4)
         .align_y(Alignment::Center)
         .into()
 }

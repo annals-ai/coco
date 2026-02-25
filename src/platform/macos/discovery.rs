@@ -270,6 +270,10 @@ fn query_app(url: impl AsRef<NSURL>, store_icons: bool) -> Option<App> {
         desc,
         icons,
         open_command: AppCommand::Function(Function::OpenApp(path.to_string_lossy().into_owned())),
+        category: None,
+        bundle_path: Some(path.to_string_lossy().into_owned()),
+        bundle_id: None,
+        pid: None,
     })
 }
 
@@ -509,7 +513,11 @@ mod tests {
             return; // skip if not installed
         }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("微信".to_string()), "WeChat zh-Hans name should be 微信, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("微信".to_string()),
+            "WeChat zh-Hans name should be 微信, got: {name:?}"
+        );
     }
 
     #[test]
@@ -519,7 +527,11 @@ mod tests {
             return;
         }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("飞书".to_string()), "Lark zh-Hans name should be 飞书, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("飞书".to_string()),
+            "Lark zh-Hans name should be 飞书, got: {name:?}"
+        );
     }
 
     #[test]
@@ -529,7 +541,11 @@ mod tests {
             return;
         }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("QQ音乐".to_string()), "QQMusic zh-Hans name should be QQ音乐, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("QQ音乐".to_string()),
+            "QQMusic zh-Hans name should be QQ音乐, got: {name:?}"
+        );
     }
 
     #[test]
@@ -539,7 +555,11 @@ mod tests {
             return;
         }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("网易云音乐".to_string()), "NeteaseMusic zh-Hans name should be 网易云音乐, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("网易云音乐".to_string()),
+            "NeteaseMusic zh-Hans name should be 网易云音乐, got: {name:?}"
+        );
     }
 
     #[test]
@@ -549,7 +569,11 @@ mod tests {
             return;
         }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("腾讯会议".to_string()), "TencentMeeting zh-Hans name should be 腾讯会议, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("腾讯会议".to_string()),
+            "TencentMeeting zh-Hans name should be 腾讯会议, got: {name:?}"
+        );
     }
 
     // === 系统 app：.loctable 格式 ===
@@ -557,71 +581,121 @@ mod tests {
     #[test]
     fn real_fs_weather() {
         let path = Path::new("/System/Applications/Weather.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("天气".to_string()), "Weather should be 天气, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("天气".to_string()),
+            "Weather should be 天气, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_notes() {
         let path = Path::new("/System/Applications/Notes.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("备忘录".to_string()), "Notes should be 备忘录, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("备忘录".to_string()),
+            "Notes should be 备忘录, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_calendar() {
         let path = Path::new("/System/Applications/Calendar.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("日历".to_string()), "Calendar should be 日历, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("日历".to_string()),
+            "Calendar should be 日历, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_calculator() {
         let path = Path::new("/System/Applications/Calculator.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("计算器".to_string()), "Calculator should be 计算器, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("计算器".to_string()),
+            "Calculator should be 计算器, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_maps() {
         let path = Path::new("/System/Applications/Maps.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("地图".to_string()), "Maps should be 地图, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("地图".to_string()),
+            "Maps should be 地图, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_photos() {
         let path = Path::new("/System/Applications/Photos.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("照片".to_string()), "Photos should be 照片, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("照片".to_string()),
+            "Photos should be 照片, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_reminders() {
         let path = Path::new("/System/Applications/Reminders.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("提醒事项".to_string()), "Reminders should be 提醒事项, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("提醒事项".to_string()),
+            "Reminders should be 提醒事项, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_system_settings() {
         let path = Path::new("/System/Applications/System Settings.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
-        assert_eq!(name, Some("系统设置".to_string()), "System Settings should be 系统设置, got: {name:?}");
+        assert_eq!(
+            name,
+            Some("系统设置".to_string()),
+            "System Settings should be 系统设置, got: {name:?}"
+        );
     }
 
     #[test]
     fn real_fs_safari_no_zh() {
         let path = Path::new("/Applications/Safari.app");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
         let name = read_zh_hans_display_name(path);
         if let Some(ref n) = name {
             assert!(!n.is_empty());

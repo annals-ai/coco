@@ -43,35 +43,180 @@ struct ParsedCurrencyQuery {
 // ── Currency definitions ────────────────────────────────────────────────────
 
 const CURRENCIES: &[CurrencyDef] = &[
-    CurrencyDef { code: "USD", symbol: "$",  flag: "🇺🇸", name_cn: "美元" },
-    CurrencyDef { code: "CNY", symbol: "¥",  flag: "🇨🇳", name_cn: "人民币" },
-    CurrencyDef { code: "EUR", symbol: "€",  flag: "🇪🇺", name_cn: "欧元" },
-    CurrencyDef { code: "GBP", symbol: "£",  flag: "🇬🇧", name_cn: "英镑" },
-    CurrencyDef { code: "JPY", symbol: "",   flag: "🇯🇵", name_cn: "日元" },
-    CurrencyDef { code: "KRW", symbol: "₩",  flag: "🇰🇷", name_cn: "韩元" },
-    CurrencyDef { code: "HKD", symbol: "",   flag: "🇭🇰", name_cn: "港币" },
-    CurrencyDef { code: "TWD", symbol: "",   flag: "🇹🇼", name_cn: "新台币" },
-    CurrencyDef { code: "SGD", symbol: "",   flag: "🇸🇬", name_cn: "新加坡元" },
-    CurrencyDef { code: "AUD", symbol: "",   flag: "🇦🇺", name_cn: "澳元" },
-    CurrencyDef { code: "CAD", symbol: "",   flag: "🇨🇦", name_cn: "加元" },
-    CurrencyDef { code: "CHF", symbol: "",   flag: "🇨🇭", name_cn: "瑞士法郎" },
-    CurrencyDef { code: "RUB", symbol: "₽",  flag: "🇷🇺", name_cn: "卢布" },
-    CurrencyDef { code: "INR", symbol: "₹",  flag: "🇮🇳", name_cn: "印度卢比" },
-    CurrencyDef { code: "BRL", symbol: "",   flag: "🇧🇷", name_cn: "巴西雷亚尔" },
-    CurrencyDef { code: "MXN", symbol: "",   flag: "🇲🇽", name_cn: "墨西哥比索" },
-    CurrencyDef { code: "THB", symbol: "฿",  flag: "🇹🇭", name_cn: "泰铢" },
-    CurrencyDef { code: "VND", symbol: "₫",  flag: "🇻🇳", name_cn: "越南盾" },
-    CurrencyDef { code: "PHP", symbol: "₱",  flag: "🇵🇭", name_cn: "菲律宾比索" },
-    CurrencyDef { code: "MYR", symbol: "",   flag: "🇲🇾", name_cn: "马来西亚林吉特" },
-    CurrencyDef { code: "NZD", symbol: "",   flag: "🇳🇿", name_cn: "新西兰元" },
-    CurrencyDef { code: "SEK", symbol: "",   flag: "🇸🇪", name_cn: "瑞典克朗" },
-    CurrencyDef { code: "NOK", symbol: "",   flag: "🇳🇴", name_cn: "挪威克朗" },
-    CurrencyDef { code: "DKK", symbol: "",   flag: "🇩🇰", name_cn: "丹麦克朗" },
-    CurrencyDef { code: "PLN", symbol: "zł", flag: "🇵🇱", name_cn: "波兰兹罗提" },
-    CurrencyDef { code: "TRY", symbol: "₺",  flag: "🇹🇷", name_cn: "土耳其里拉" },
-    CurrencyDef { code: "ZAR", symbol: "",   flag: "🇿🇦", name_cn: "南非兰特" },
-    CurrencyDef { code: "AED", symbol: "",   flag: "🇦🇪", name_cn: "阿联酋迪拉姆" },
-    CurrencyDef { code: "SAR", symbol: "",   flag: "🇸🇦", name_cn: "沙特里亚尔" },
+    CurrencyDef {
+        code: "USD",
+        symbol: "$",
+        flag: "🇺🇸",
+        name_cn: "美元",
+    },
+    CurrencyDef {
+        code: "CNY",
+        symbol: "¥",
+        flag: "🇨🇳",
+        name_cn: "人民币",
+    },
+    CurrencyDef {
+        code: "EUR",
+        symbol: "€",
+        flag: "🇪🇺",
+        name_cn: "欧元",
+    },
+    CurrencyDef {
+        code: "GBP",
+        symbol: "£",
+        flag: "🇬🇧",
+        name_cn: "英镑",
+    },
+    CurrencyDef {
+        code: "JPY",
+        symbol: "",
+        flag: "🇯🇵",
+        name_cn: "日元",
+    },
+    CurrencyDef {
+        code: "KRW",
+        symbol: "₩",
+        flag: "🇰🇷",
+        name_cn: "韩元",
+    },
+    CurrencyDef {
+        code: "HKD",
+        symbol: "",
+        flag: "🇭🇰",
+        name_cn: "港币",
+    },
+    CurrencyDef {
+        code: "TWD",
+        symbol: "",
+        flag: "🇹🇼",
+        name_cn: "新台币",
+    },
+    CurrencyDef {
+        code: "SGD",
+        symbol: "",
+        flag: "🇸🇬",
+        name_cn: "新加坡元",
+    },
+    CurrencyDef {
+        code: "AUD",
+        symbol: "",
+        flag: "🇦🇺",
+        name_cn: "澳元",
+    },
+    CurrencyDef {
+        code: "CAD",
+        symbol: "",
+        flag: "🇨🇦",
+        name_cn: "加元",
+    },
+    CurrencyDef {
+        code: "CHF",
+        symbol: "",
+        flag: "🇨🇭",
+        name_cn: "瑞士法郎",
+    },
+    CurrencyDef {
+        code: "RUB",
+        symbol: "₽",
+        flag: "🇷🇺",
+        name_cn: "卢布",
+    },
+    CurrencyDef {
+        code: "INR",
+        symbol: "₹",
+        flag: "🇮🇳",
+        name_cn: "印度卢比",
+    },
+    CurrencyDef {
+        code: "BRL",
+        symbol: "",
+        flag: "🇧🇷",
+        name_cn: "巴西雷亚尔",
+    },
+    CurrencyDef {
+        code: "MXN",
+        symbol: "",
+        flag: "🇲🇽",
+        name_cn: "墨西哥比索",
+    },
+    CurrencyDef {
+        code: "THB",
+        symbol: "฿",
+        flag: "🇹🇭",
+        name_cn: "泰铢",
+    },
+    CurrencyDef {
+        code: "VND",
+        symbol: "₫",
+        flag: "🇻🇳",
+        name_cn: "越南盾",
+    },
+    CurrencyDef {
+        code: "PHP",
+        symbol: "₱",
+        flag: "🇵🇭",
+        name_cn: "菲律宾比索",
+    },
+    CurrencyDef {
+        code: "MYR",
+        symbol: "",
+        flag: "🇲🇾",
+        name_cn: "马来西亚林吉特",
+    },
+    CurrencyDef {
+        code: "NZD",
+        symbol: "",
+        flag: "🇳🇿",
+        name_cn: "新西兰元",
+    },
+    CurrencyDef {
+        code: "SEK",
+        symbol: "",
+        flag: "🇸🇪",
+        name_cn: "瑞典克朗",
+    },
+    CurrencyDef {
+        code: "NOK",
+        symbol: "",
+        flag: "🇳🇴",
+        name_cn: "挪威克朗",
+    },
+    CurrencyDef {
+        code: "DKK",
+        symbol: "",
+        flag: "🇩🇰",
+        name_cn: "丹麦克朗",
+    },
+    CurrencyDef {
+        code: "PLN",
+        symbol: "zł",
+        flag: "🇵🇱",
+        name_cn: "波兰兹罗提",
+    },
+    CurrencyDef {
+        code: "TRY",
+        symbol: "₺",
+        flag: "🇹🇷",
+        name_cn: "土耳其里拉",
+    },
+    CurrencyDef {
+        code: "ZAR",
+        symbol: "",
+        flag: "🇿🇦",
+        name_cn: "南非兰特",
+    },
+    CurrencyDef {
+        code: "AED",
+        symbol: "",
+        flag: "🇦🇪",
+        name_cn: "阿联酋迪拉姆",
+    },
+    CurrencyDef {
+        code: "SAR",
+        symbol: "",
+        flag: "🇸🇦",
+        name_cn: "沙特里亚尔",
+    },
 ];
 
 /// Symbols that map to a specific currency.
@@ -182,7 +327,11 @@ pub fn convert_query(query: &str) -> Option<Vec<CurrencyResult>> {
         });
     }
 
-    if results.is_empty() { None } else { Some(results) }
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
 }
 
 /// Format a currency value for display.
@@ -256,7 +405,11 @@ fn try_parse_symbol_prefix(q: &str) -> Option<ParsedCurrencyQuery> {
         }
         let source = find_currency_by_code(code)?;
         let target = parse_optional_target(after_num);
-        return Some(ParsedCurrencyQuery { value, source, target });
+        return Some(ParsedCurrencyQuery {
+            value,
+            source,
+            target,
+        });
     }
     None
 }
@@ -274,7 +427,11 @@ fn try_parse_symbol_suffix(q: &str) -> Option<ParsedCurrencyQuery> {
         let after_symbol = rest[symbol.len()..].trim_start();
         let source = find_currency_by_code(code)?;
         let target = parse_optional_target(after_symbol);
-        return Some(ParsedCurrencyQuery { value, source, target });
+        return Some(ParsedCurrencyQuery {
+            value,
+            source,
+            target,
+        });
     }
     None
 }
@@ -305,7 +462,11 @@ fn try_parse_code_based(q: &str) -> Option<ParsedCurrencyQuery> {
         _ => return None,
     };
 
-    Some(ParsedCurrencyQuery { value, source, target })
+    Some(ParsedCurrencyQuery {
+        value,
+        source,
+        target,
+    })
 }
 
 fn parse_optional_target(s: &str) -> Option<&'static CurrencyDef> {

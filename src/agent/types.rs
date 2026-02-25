@@ -27,7 +27,6 @@ pub enum ClaudeEvent {
     SessionStarted(String),
     TextDelta(String),
     ToolUse { name: String },
-    ToolResult(String),
     Finished,
     Error(String),
 }

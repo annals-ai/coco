@@ -1,6 +1,6 @@
 # Things you can configure
 
-# Your hotkey that will be used to toggle rustcast
+# Your hotkey that will be used to toggle Coco
 toggle_hotkey = "ALT+SHIFT+1"
 
 placeholder = "Oopsie Dasies"

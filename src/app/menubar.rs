@@ -54,13 +54,21 @@ pub fn menu_icon(hotkey: HotKey, sender: ExtSender) -> TrayIcon {
 }
 
 fn get_image() -> DynamicImage {
-    let image_path = if cfg!(debug_assertions) {
+    // Prefer the dedicated tray icon (44px, optimized for menu bar)
+    let tray_path = "/Applications/Coco.app/Contents/Resources/tray_icon.png";
+    let fallback_path = if cfg!(debug_assertions) {
         "docs/icon.png"
     } else {
-        "/Applications/Rustcast.app/Contents/Resources/icon.png"
+        "/Applications/Coco.app/Contents/Resources/icon.png"
     };
 
-    ImageReader::open(image_path).unwrap().decode().unwrap()
+    let path = if std::path::Path::new(tray_path).exists() {
+        tray_path
+    } else {
+        fallback_path
+    };
+
+    ImageReader::open(path).unwrap().decode().unwrap()
 }
 
 fn init_event_handler(sender: ExtSender, hotkey_id: u32) {
@@ -70,7 +78,7 @@ fn init_event_handler(sender: ExtSender, hotkey_id: u32) {
         let sender = sender.clone();
         let sender = sender.0.clone();
         match x.id().0.as_str() {
-            "refresh_rustcast" => {
+            "refresh_coco" => {
                 runtime.spawn(async move {
                     sender.clone().try_send(Message::ReloadConfig).unwrap();
                 });
@@ -80,9 +88,9 @@ fn init_event_handler(sender: ExtSender, hotkey_id: u32) {
                     .spawn(async move { sender.clone().try_send(Message::HideTrayIcon).unwrap() });
             }
             "open_issue_page" => {
-                open_url("https://github.com/unsecretised/rustcast/issues/new");
+                open_url("https://github.com/unsecretised/coco/issues/new");
             }
-            "show_rustcast" => {
+            "show_coco" => {
                 runtime.spawn(async move {
                     sender
                         .clone()
@@ -94,13 +102,13 @@ fn init_event_handler(sender: ExtSender, hotkey_id: u32) {
                 open_url(DISCORD_LINK);
             }
             "open_help_page" => {
-                open_url("https://github.com/unsecretised/rustcast/discussions/new?category=q-a");
+                open_url("https://github.com/unsecretised/coco/discussions/new?category=q-a");
             }
             "open_preferences" => {
                 open_settings();
             }
             "open_github_page" => {
-                open_url("https://github.com/unsecretised/rustcast");
+                open_url("https://github.com/unsecretised/coco");
             }
             _ => {}
         }
@@ -113,7 +121,7 @@ fn version_item() -> MenuItem {
 }
 
 fn discord_item() -> MenuItem {
-    MenuItem::with_id("open_discord", "RustCast discord", true, None)
+    MenuItem::with_id("open_discord", "Coco discord", true, None)
 }
 
 fn hide_tray_icon() -> MenuItem {
@@ -122,7 +130,7 @@ fn hide_tray_icon() -> MenuItem {
 
 fn open_item(hotkey: HotKey) -> MenuItem {
     MenuItem::with_id(
-        "show_rustcast",
+        "show_coco",
         "Toggle View",
         true,
         Some(Accelerator::new(Some(hotkey.mods), hotkey.key)),
@@ -139,7 +147,7 @@ fn open_issue_item() -> MenuItem {
 
 fn refresh_item() -> MenuItem {
     MenuItem::with_id(
-        "refresh_rustcast",
+        "refresh_coco",
         "Refresh",
         true,
         Some(Accelerator::new(
@@ -168,14 +176,14 @@ fn quit_item() -> PredefinedMenuItem {
 
 fn about_item(image: DynamicImage) -> PredefinedMenuItem {
     let about_metadata_builder = AboutMetadataBuilder::new()
-        .name(Some("RustCast"))
+        .name(Some("Coco"))
         .version(Some(
             option_env!("APP_VERSION").unwrap_or("Unknown Version"),
         ))
         .authors(Some(vec!["Unsecretised".to_string()]))
         .credits(Some("Unsecretised".to_string()))
         .icon(Ico::from_rgba(image.as_bytes().to_vec(), image.width(), image.height()).ok())
-        .website(Some("https://rustcast.umangsurana.com"))
+        .website(Some("https://coco.umangsurana.com"))
         .license(Some("MIT"))
         .build();
 

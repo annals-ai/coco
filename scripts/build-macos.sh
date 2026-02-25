@@ -1,16 +1,16 @@
 #!/usr/bin/env -S bash -e
 
-TARGET="rustcast"                   # your Cargo binary name
+TARGET="coco"                       # your Cargo binary name
 ASSETS_DIR="assets"
 RELEASE_DIR="target/release"
-APP_NAME="Rustcast.app"
+APP_NAME="Coco.app"
 APP_TEMPLATE="$ASSETS_DIR/macos/$APP_NAME"
 APP_TEMPLATE_PLIST="$APP_TEMPLATE/Contents/Info.plist"
 APP_DIR="$RELEASE_DIR/macos"
 APP_BINARY="$RELEASE_DIR/$TARGET"
 APP_BINARY_DIR="$APP_DIR/$APP_NAME/Contents/MacOS"
 APP_EXTRAS_DIR="$APP_DIR/$APP_NAME/Contents/Resources"
-DMG_NAME="rustcast.dmg"
+DMG_NAME="coco.dmg"
 DMG_DIR="$RELEASE_DIR/macos"
 
 VERSION="{$APP_VERSION}"

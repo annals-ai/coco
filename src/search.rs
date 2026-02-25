@@ -88,20 +88,19 @@ pub fn build_search_meta(name: &str, localized_name: Option<&str>) -> SearchMeta
     };
 
     // 本地化名称的搜索元数据
-    let (loc_name_lc, loc_pinyin_full, loc_pinyin_initials) =
-        if let Some(ln) = localized_name {
-            let ln_lc = ln.to_lowercase();
-            let ln_has_cjk = ln.chars().any(is_cjk_char);
-            let (lpf, lpi) = if ln_has_cjk {
-                let (f, i) = compute_pinyin(ln);
-                (Some(f), Some(i))
-            } else {
-                (None, None)
-            };
-            (Some(ln_lc), lpf, lpi)
+    let (loc_name_lc, loc_pinyin_full, loc_pinyin_initials) = if let Some(ln) = localized_name {
+        let ln_lc = ln.to_lowercase();
+        let ln_has_cjk = ln.chars().any(is_cjk_char);
+        let (lpf, lpi) = if ln_has_cjk {
+            let (f, i) = compute_pinyin(ln);
+            (Some(f), Some(i))
         } else {
-            (None, None, None)
+            (None, None)
         };
+        (Some(ln_lc), lpf, lpi)
+    } else {
+        (None, None, None)
+    };
 
     SearchMeta {
         name_lc,
@@ -135,17 +134,11 @@ impl AppIndex {
             let meta = build_search_meta(&app.name, app.localized_name.as_deref());
 
             // 索引 name_lc（app 原始字段，可能是英文原名小写如 "wechat"）
-            by_name
-                .entry(app.name_lc.clone())
-                .or_default()
-                .push(i);
+            by_name.entry(app.name_lc.clone()).or_default().push(i);
 
             // 如果 meta.name_lc 和 app.name_lc 不同（name 被替换为中文显示名时），也索引
             if meta.name_lc != app.name_lc {
-                by_name
-                    .entry(meta.name_lc.clone())
-                    .or_default()
-                    .push(i);
+                by_name.entry(meta.name_lc.clone()).or_default().push(i);
             }
 
             if meta.has_cjk && !meta.pinyin_full.is_empty() {
@@ -204,7 +197,8 @@ impl AppIndex {
 
         let query_lc = query.to_lowercase();
         let mut scored: Vec<ScoredApp> = Vec::new();
-        let mut matched_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut matched_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
 
         // Layer 1: 精确前缀匹配（原名小写）
         let exact_hits = Self::prefix_search(&self.by_name, &query_lc);
@@ -291,11 +285,7 @@ impl AppIndex {
         }
 
         // 排序：match_type 优先，score 降序
-        scored.sort_by(|a, b| {
-            a.match_type
-                .cmp(&b.match_type)
-                .then(b.score.cmp(&a.score))
-        });
+        scored.sort_by(|a, b| a.match_type.cmp(&b.match_type).then(b.score.cmp(&a.score)));
 
         scored.truncate(20);
         scored.into_iter().map(|s| s.app).collect()
@@ -316,6 +306,10 @@ mod tests {
             desc: String::new(),
             icons: None,
             open_command: AppCommand::Display,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
         }
     }
 
@@ -331,6 +325,10 @@ mod tests {
             desc: bundle_name.to_string(),
             icons: None,
             open_command: AppCommand::Display,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
         }
     }
 
@@ -358,7 +356,8 @@ mod tests {
 
     fn search_names(index: &AppIndex, query: &str) -> Vec<String> {
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
-        index.search(query, &mut matcher)
+        index
+            .search(query, &mut matcher)
             .iter()
             .map(|a| a.name.clone())
             .collect()
@@ -430,103 +429,154 @@ mod tests {
     #[test]
     fn real_wechat_by_chinese_prefix() {
         let names = search_names(&make_real_world_index(), "微信");
-        assert!(names.contains(&"微信".to_string()), "微信 should find 微信, got: {names:?}");
+        assert!(
+            names.contains(&"微信".to_string()),
+            "微信 should find 微信, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_wechat_by_chinese_partial() {
         let names = search_names(&make_real_world_index(), "微");
-        assert!(names.contains(&"微信".to_string()), "微 should find 微信, got: {names:?}");
+        assert!(
+            names.contains(&"微信".to_string()),
+            "微 should find 微信, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_wechat_by_pinyin_full() {
         let names = search_names(&make_real_world_index(), "weixin");
-        assert!(names.contains(&"微信".to_string()), "weixin should find 微信, got: {names:?}");
+        assert!(
+            names.contains(&"微信".to_string()),
+            "weixin should find 微信, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_wechat_by_pinyin_initials() {
         let names = search_names(&make_real_world_index(), "wx");
-        assert!(names.contains(&"微信".to_string()), "wx should find 微信, got: {names:?}");
+        assert!(
+            names.contains(&"微信".to_string()),
+            "wx should find 微信, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_wechat_by_english_name() {
         let names = search_names(&make_real_world_index(), "wechat");
-        assert!(names.contains(&"微信".to_string()), "wechat should find 微信, got: {names:?}");
+        assert!(
+            names.contains(&"微信".to_string()),
+            "wechat should find 微信, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_lark_by_chinese() {
         let names = search_names(&make_real_world_index(), "飞书");
-        assert!(names.contains(&"飞书".to_string()), "飞书 should find 飞书, got: {names:?}");
+        assert!(
+            names.contains(&"飞书".to_string()),
+            "飞书 should find 飞书, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_lark_by_pinyin() {
         let names = search_names(&make_real_world_index(), "feishu");
-        assert!(names.contains(&"飞书".to_string()), "feishu should find 飞书, got: {names:?}");
+        assert!(
+            names.contains(&"飞书".to_string()),
+            "feishu should find 飞书, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_lark_by_initials() {
         let names = search_names(&make_real_world_index(), "fs");
-        assert!(names.contains(&"飞书".to_string()), "fs should find 飞书, got: {names:?}");
+        assert!(
+            names.contains(&"飞书".to_string()),
+            "fs should find 飞书, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_lark_by_english() {
         let names = search_names(&make_real_world_index(), "lark");
-        assert!(names.contains(&"飞书".to_string()), "lark should find 飞书, got: {names:?}");
+        assert!(
+            names.contains(&"飞书".to_string()),
+            "lark should find 飞书, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_qqmusic_by_localized_chinese() {
         let names = search_names(&make_real_world_index(), "qq音乐");
-        assert!(names.contains(&"QQ音乐".to_string()), "QQ音乐 should find QQ音乐, got: {names:?}");
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "QQ音乐 should find QQ音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_qqmusic_by_localized_pinyin() {
         let names = search_names(&make_real_world_index(), "qqyinle");
-        assert!(names.contains(&"QQ音乐".to_string()), "qqyinle should find QQ音乐, got: {names:?}");
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "qqyinle should find QQ音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_qqmusic_by_english() {
         let names = search_names(&make_real_world_index(), "qqmusic");
-        assert!(names.contains(&"QQ音乐".to_string()), "qqmusic should find QQ音乐, got: {names:?}");
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "qqmusic should find QQ音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_netease_by_partial_chinese() {
         let names = search_names(&make_real_world_index(), "网易");
-        assert!(names.contains(&"网易云音乐".to_string()), "网易 should find 网易云音乐, got: {names:?}");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "网易 should find 网易云音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_netease_by_pinyin() {
         let names = search_names(&make_real_world_index(), "wangyiyun");
-        assert!(names.contains(&"网易云音乐".to_string()), "wangyiyun should find 网易云音乐, got: {names:?}");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "wangyiyun should find 网易云音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_netease_by_english() {
         let names = search_names(&make_real_world_index(), "netease");
-        assert!(names.contains(&"网易云音乐".to_string()), "netease should find 网易云音乐, got: {names:?}");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "netease should find 网易云音乐, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_tencent_meeting_by_initials() {
         let names = search_names(&make_real_world_index(), "txhy");
-        assert!(names.contains(&"腾讯会议".to_string()), "txhy should find 腾讯会议, got: {names:?}");
+        assert!(
+            names.contains(&"腾讯会议".to_string()),
+            "txhy should find 腾讯会议, got: {names:?}"
+        );
     }
 
     #[test]
     fn real_tencent_meeting_by_english() {
         let names = search_names(&make_real_world_index(), "tencent");
-        assert!(names.contains(&"腾讯会议".to_string()), "tencent should find 腾讯会议, got: {names:?}");
+        assert!(
+            names.contains(&"腾讯会议".to_string()),
+            "tencent should find 腾讯会议, got: {names:?}"
+        );
     }
 
     #[test]
@@ -544,7 +594,10 @@ mod tests {
     #[test]
     fn real_vscode_by_fuzzy() {
         let names = search_names(&make_real_world_index(), "vscode");
-        assert!(names.contains(&"Visual Studio Code".to_string()), "vscode should find VS Code, got: {names:?}");
+        assert!(
+            names.contains(&"Visual Studio Code".to_string()),
+            "vscode should find VS Code, got: {names:?}"
+        );
     }
 
     #[test]
@@ -557,10 +610,7 @@ mod tests {
 
     #[test]
     fn exact_prefix_ranks_higher_than_pinyin() {
-        let apps = vec![
-            make_localized_app("WeChat", "微信"),
-            make_app("微信读书"),
-        ];
+        let apps = vec![make_localized_app("WeChat", "微信"), make_app("微信读书")];
         let index = AppIndex::from_apps(apps);
         let names = search_names(&index, "微信");
         assert!(names.contains(&"微信".to_string()));
@@ -577,7 +627,10 @@ mod tests {
         ];
         let index = AppIndex::from_apps(apps);
         let names = search_names(&index, "设置");
-        assert!(names.contains(&"系统设置".to_string()), "设置 should find 系统设置, got: {names:?}");
+        assert!(
+            names.contains(&"系统设置".to_string()),
+            "设置 should find 系统设置, got: {names:?}"
+        );
     }
 
     #[test]
@@ -589,8 +642,14 @@ mod tests {
         ];
         let index = AppIndex::from_apps(apps);
         let names = search_names(&index, "音乐");
-        assert!(names.contains(&"网易云音乐".to_string()), "音乐 should find 网易云音乐, got: {names:?}");
-        assert!(names.contains(&"QQ音乐".to_string()), "音乐 should find QQ音乐, got: {names:?}");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "音乐 should find 网易云音乐, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "音乐 should find QQ音乐, got: {names:?}"
+        );
     }
 
     #[test]
@@ -601,7 +660,10 @@ mod tests {
         ];
         let index = AppIndex::from_apps(apps);
         let names = search_names(&index, "会议");
-        assert!(names.contains(&"腾讯会议".to_string()), "会议 should find 腾讯会议, got: {names:?}");
+        assert!(
+            names.contains(&"腾讯会议".to_string()),
+            "会议 should find 腾讯会议, got: {names:?}"
+        );
     }
 
     // === E2E 测试：真实 discovery → index → search ===
@@ -610,13 +672,18 @@ mod tests {
     fn e2e_search_shezhi_finds_system_settings() {
         use crate::platform::get_installed_apps;
         let apps = get_installed_apps(false);
-        if !apps.iter().any(|a| a.name.contains("系统设置") || a.name.contains("System Settings")) {
+        if !apps
+            .iter()
+            .any(|a| a.name.contains("系统设置") || a.name.contains("System Settings"))
+        {
             return; // skip if not available
         }
         let index = AppIndex::from_apps(apps);
         let names = search_names(&index, "设置");
         assert!(
-            names.iter().any(|n| n.contains("系统设置") || n.contains("System Settings")),
+            names
+                .iter()
+                .any(|n| n.contains("系统设置") || n.contains("System Settings")),
             "e2e: 设置 should find System Settings, got: {names:?}"
         );
     }
@@ -625,7 +692,10 @@ mod tests {
     fn e2e_search_tianqi_finds_weather() {
         use crate::platform::get_installed_apps;
         let apps = get_installed_apps(false);
-        if !apps.iter().any(|a| a.name.contains("天气") || a.name.contains("Weather")) {
+        if !apps
+            .iter()
+            .any(|a| a.name.contains("天气") || a.name.contains("Weather"))
+        {
             return;
         }
         let index = AppIndex::from_apps(apps);
@@ -659,13 +729,21 @@ mod tests {
         // Test diverse icon formats: .icns, Assets.car, Electron, system apps
         let apps = [
             ("/System/Applications/Calendar.app", "Calendar (Assets.car)"),
-            ("/System/Applications/Photo Booth.app", "Photo Booth (Assets.car)"),
-            ("/System/Applications/System Settings.app", "System Settings"),
+            (
+                "/System/Applications/Photo Booth.app",
+                "Photo Booth (Assets.car)",
+            ),
+            (
+                "/System/Applications/System Settings.app",
+                "System Settings",
+            ),
             ("/Applications/Safari.app", "Safari"),
         ];
         for (path, label) in &apps {
             let p = Path::new(path);
-            if !p.exists() { continue; }
+            if !p.exists() {
+                continue;
+            }
             assert!(icon_from_workspace(p).is_some(), "{label} should have icon");
         }
     }
@@ -677,8 +755,13 @@ mod tests {
 
         // Use a known app to test
         let p = Path::new("/Applications/Safari.app");
-        if !p.exists() { return; }
+        if !p.exists() {
+            return;
+        }
         let result = icon_from_workspace(p);
-        assert!(result.is_some(), "Safari should have an icon via NSWorkspace");
+        assert!(
+            result.is_some(),
+            "Safari should have an icon via NSWorkspace"
+        );
     }
 }

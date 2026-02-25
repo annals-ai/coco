@@ -2,9 +2,12 @@ mod agent;
 mod app;
 mod calculator;
 mod clipboard;
+mod clipboard_store;
 mod commands;
 mod config;
 mod currency_conversion;
+mod history;
+mod icons;
 mod platform;
 mod search;
 mod styles;
@@ -27,9 +30,9 @@ fn main() -> iced::Result {
 
     let home = std::env::var("HOME").unwrap();
 
-    let file_path = home.clone() + "/.config/rustcast/config.toml";
+    let file_path = home.clone() + "/.config/coco/config.toml";
     if !Path::new(&file_path).exists() {
-        std::fs::create_dir_all(home + "/.config/rustcast").unwrap();
+        std::fs::create_dir_all(home + "/.config/coco").unwrap();
         std::fs::write(
             &file_path,
             toml::to_string(&Config::default()).unwrap_or_else(|x| x.to_string()),
@@ -65,6 +68,7 @@ fn main() -> iced::Result {
         tile::update::handle_update,
         tile::elm::view,
     )
+    .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
     .subscription(Tile::subscription)
     .theme(Tile::theme)
     .run()

@@ -1,4 +1,4 @@
-//! This handles all the different commands that rustcast can perform, such as opening apps,
+//! This handles all the different commands that Coco can perform, such as opening apps,
 //! copying to clipboard, etc.
 use std::{process::Command, thread};
 
@@ -8,10 +8,17 @@ use objc2_foundation::NSURL;
 
 use crate::{calculator::Expr, clipboard::ClipBoardContentType, config::Config};
 
-/// The different functions that rustcast can perform
+/// The different functions that Coco can perform
 #[derive(Debug, Clone, PartialEq)]
 pub enum Function {
     OpenApp(String),
+    ActivateApp(i32),
+    HideApp(i32),
+    QuitApp(i32),
+    ForceQuitApp(i32),
+    ShowInFinder(String),
+    CopyPath(String),
+    CopyBundleId(String),
     RunShellCommand(String, String),
     OpenWebsite(String),
     RandomVar(i32), // Easter egg function
@@ -28,11 +35,43 @@ impl Function {
         match self {
             Function::OpenApp(path) => {
                 let path = path.to_owned();
+                // Record in history
+                let name = std::path::Path::new(&path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let path_clone = path.clone();
                 thread::spawn(move || {
                     NSWorkspace::new().openURL(&NSURL::fileURLWithPath(
-                        &objc2_foundation::NSString::from_str(&path),
+                        &objc2_foundation::NSString::from_str(&path_clone),
                     ));
                 });
+                // Record launch history in background
+                thread::spawn(move || {
+                    let mut history = crate::history::History::load();
+                    history.record_launch(&path, &name);
+                });
+            }
+            Function::ActivateApp(pid) => {
+                crate::platform::activate_app_by_pid(*pid);
+            }
+            Function::HideApp(pid) => {
+                crate::platform::hide_app_by_pid(*pid);
+            }
+            Function::QuitApp(pid) => {
+                crate::platform::quit_app_by_pid(*pid);
+            }
+            Function::ForceQuitApp(pid) => {
+                crate::platform::force_quit_app_by_pid(*pid);
+            }
+            Function::ShowInFinder(path) => {
+                crate::platform::reveal_in_finder(path);
+            }
+            Function::CopyPath(path) => {
+                Clipboard::new().unwrap().set_text(path.clone()).ok();
+            }
+            Function::CopyBundleId(bundle_id) => {
+                Clipboard::new().unwrap().set_text(bundle_id.clone()).ok();
             }
             Function::RunShellCommand(command, alias) => {
                 let query = query.to_string();
@@ -104,7 +143,7 @@ impl Function {
                     NSWorkspace::new().openURL(&NSURL::fileURLWithPath(
                         &objc2_foundation::NSString::from_str(
                             &(std::env::var("HOME").unwrap_or("".to_string())
-                                + "/.config/rustcast/config.toml"),
+                                + "/.config/coco/config.toml"),
                         ),
                     ));
                 });

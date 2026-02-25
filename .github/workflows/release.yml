@@ -75,7 +75,7 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustcast-macos-dmg
+          name: coco-macos-dmg
           path: ${{ env.DMG_PATH }}
           retention-days: 7
 
