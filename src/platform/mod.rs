@@ -1,7 +1,7 @@
 use iced::wgpu::rwh::WindowHandle;
 
 pub use self::cross::default_app_paths;
-use crate::app::apps::App;
+use crate::{app::apps::App, clipboard::ClipBoardContentType};
 
 /// Information about a window for the window switcher
 #[derive(Debug, Clone)]
@@ -79,18 +79,6 @@ pub fn open_input_monitoring_settings() {
     self::macos::open_input_monitoring_settings();
 }
 
-pub fn install_double_tap_option_monitor() {
-    #[cfg(target_os = "macos")]
-    self::macos::install_double_tap_option_monitor();
-}
-
-pub fn poll_double_tap_option() -> bool {
-    #[cfg(target_os = "macos")]
-    return self::macos::poll_double_tap_option();
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
 pub fn get_running_apps(store_icons: bool) -> Vec<App> {
     #[cfg(target_os = "macos")]
     return self::macos::get_running_apps(store_icons);
@@ -121,6 +109,65 @@ pub fn force_quit_app_by_pid(pid: i32) {
 pub fn reveal_in_finder(path: &str) {
     #[cfg(target_os = "macos")]
     self::macos::reveal_in_finder(path);
+}
+
+pub fn paste_to_frontmost(target_pid: Option<i32>) {
+    #[cfg(target_os = "macos")]
+    self::macos::paste_to_frontmost(target_pid);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target_pid;
+    }
+}
+
+pub fn paste_permission_warning_active() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return self::macos::paste_permission_warning_active();
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+pub fn accessibility_permission_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return self::macos::accessibility_permission_granted();
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+pub fn quick_look_clipboard_content(entry_id: u64, content: &ClipBoardContentType) {
+    #[cfg(target_os = "macos")]
+    self::macos::quick_look_clipboard_content(entry_id, content);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (entry_id, content);
+    }
+}
+
+pub fn show_clipboard_preview_panel(content: &ClipBoardContentType) {
+    #[cfg(target_os = "macos")]
+    self::macos::show_clipboard_preview_panel(content);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = content;
+    }
+}
+
+pub fn update_clipboard_preview_panel(content: &ClipBoardContentType) {
+    #[cfg(target_os = "macos")]
+    self::macos::update_clipboard_preview_panel(content);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = content;
+    }
+}
+
+pub fn hide_clipboard_preview_panel() {
+    #[cfg(target_os = "macos")]
+    self::macos::hide_clipboard_preview_panel();
 }
 
 pub fn get_window_list() -> Vec<WindowInfo> {

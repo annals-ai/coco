@@ -39,6 +39,16 @@ static BLUR_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// Raw pointer to the agent blur child NSWindow.
 static AGENT_BLUR_WINDOW: AtomicUsize = AtomicUsize::new(0);
 
+/// Raw pointers for native clipboard preview panel and its subviews.
+static CLIPBOARD_PREVIEW_PANEL: AtomicUsize = AtomicUsize::new(0);
+static CLIPBOARD_PREVIEW_TEXT_SCROLL: AtomicUsize = AtomicUsize::new(0);
+static CLIPBOARD_PREVIEW_TEXT_VIEW: AtomicUsize = AtomicUsize::new(0);
+static CLIPBOARD_PREVIEW_IMAGE_VIEW: AtomicUsize = AtomicUsize::new(0);
+static CLIPBOARD_PREVIEW_VIDEO_VIEW: AtomicUsize = AtomicUsize::new(0);
+static CLIPBOARD_PREVIEW_PLAYER: AtomicUsize = AtomicUsize::new(0);
+static PASTE_PERMISSION_WARNING: AtomicBool = AtomicBool::new(false);
+static AX_PROMPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// Raw pointer to the main NSWindow, for show/hide animation.
 static MAIN_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// Raw pointer to the iced/wgpu NSView used as the main render view.
@@ -56,134 +66,15 @@ const MAIN_GLASS_BLACK_OVERLAY_ALPHA: f64 = 0.0;
 const EDGE_GLASS_HIGHLIGHT_ALPHA: f64 = 0.10;
 const EDGE_RING_ALPHA: f64 = 1.0;
 const EDGE_RING_WIDTH: f64 = 1.0;
-
-// ── Double-tap Option key detection ──────────────────────────────────────
-
-/// Timestamp (ms since epoch) of last Option key release.
-static LAST_OPTION_UP: AtomicU64 = AtomicU64::new(0);
-/// Whether Option was pressed alone (no other keys in between).
-static OPTION_ALONE: AtomicBool = AtomicBool::new(false);
-/// Set to true when a double-tap is detected; polled by the subscription.
-static DOUBLE_TAP_FIRED: AtomicBool = AtomicBool::new(false);
-
-/// Maximum interval in ms between two Option key releases to count as double-tap.
-const DOUBLE_TAP_MS: u64 = 400;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Install a CGEventTap to detect double-tap Option key globally.
-/// Uses a C callback (no block needed), runs on a background thread with its own CFRunLoop.
-pub(super) fn install_double_tap_option_monitor() {
-    use std::ffi::c_void;
-
-    // CoreGraphics types
-    type CGEventRef = *mut c_void;
-    type CGEventTapProxy = *mut c_void;
-    type CGEventType = u32;
-    type CGEventMask = u64;
-    type CGEventFlags = u64;
-
-    const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
-    const K_CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x80000; // Option/Alt
-    const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x100000;
-    const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x20000;
-    const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x40000;
-
-    unsafe extern "C" {
-        fn CGEventTapCreate(
-            tap: u32,
-            place: u32,
-            options: u32,
-            events_of_interest: CGEventMask,
-            callback: extern "C" fn(
-                CGEventTapProxy,
-                CGEventType,
-                CGEventRef,
-                *mut c_void,
-            ) -> CGEventRef,
-            user_info: *mut c_void,
-        ) -> *mut c_void; // CFMachPortRef
-        fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
-        fn CFMachPortCreateRunLoopSource(
-            allocator: *const c_void,
-            port: *mut c_void,
-            order: i64,
-        ) -> *mut c_void;
-        fn CFRunLoopGetCurrent() -> *mut c_void;
-        fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
-        fn CFRunLoopRun();
-    }
-
-    unsafe extern "C" {
-        static kCFRunLoopCommonModes: *const c_void;
-    }
-
-    extern "C" fn tap_callback(
-        _proxy: CGEventTapProxy,
-        _type: CGEventType,
-        event: CGEventRef,
-        _user_info: *mut c_void,
-    ) -> CGEventRef {
-        if _type != K_CG_EVENT_FLAGS_CHANGED {
-            return event;
-        }
-        let flags = unsafe { CGEventGetFlags(event) };
-
-        let option_down = (flags & K_CG_EVENT_FLAG_MASK_ALTERNATE) != 0;
-        let other_mods = flags
-            & (K_CG_EVENT_FLAG_MASK_COMMAND
-                | K_CG_EVENT_FLAG_MASK_SHIFT
-                | K_CG_EVENT_FLAG_MASK_CONTROL);
-        let only_option = option_down && other_mods == 0;
-
-        if only_option {
-            OPTION_ALONE.store(true, Ordering::Relaxed);
-        } else if !option_down && OPTION_ALONE.load(Ordering::Relaxed) {
-            OPTION_ALONE.store(false, Ordering::Relaxed);
-
-            let now = now_ms();
-            let last = LAST_OPTION_UP.swap(now, Ordering::Relaxed);
-
-            if last > 0 && (now - last) < DOUBLE_TAP_MS {
-                DOUBLE_TAP_FIRED.store(true, Ordering::Relaxed);
-                LAST_OPTION_UP.store(0, Ordering::Relaxed);
-            }
-        } else {
-            OPTION_ALONE.store(false, Ordering::Relaxed);
-        }
-        event
-    }
-
-    std::thread::spawn(|| unsafe {
-        let mask: CGEventMask = 1 << K_CG_EVENT_FLAGS_CHANGED;
-        let tap = CGEventTapCreate(
-            0, // kCGSessionEventTap
-            0, // kCGHeadInsertEventTap
-            1, // kCGEventTapOptionListenOnly
-            mask,
-            tap_callback,
-            std::ptr::null_mut(),
-        );
-        if tap.is_null() {
-            eprintln!("Failed to create CGEventTap (Accessibility permission needed)");
-            return;
-        }
-        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-        let rl = CFRunLoopGetCurrent();
-        CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
-        CFRunLoopRun(); // blocks forever
-    });
-}
-
-/// Check if a double-tap Option event was fired (and consume it).
-pub(super) fn poll_double_tap_option() -> bool {
-    DOUBLE_TAP_FIRED.swap(false, Ordering::Relaxed)
-}
+const BLUR_SHADOW_CARRIER_ALPHA: f64 = 0.001;
+const BLUR_SHADOW_OPACITY: f32 = 0.36;
+const BLUR_SHADOW_RADIUS: f64 = 22.0;
+const BLUR_SHADOW_OFFSET_Y: f64 = -2.0;
+const CLIPBOARD_PREVIEW_PANEL_WIDTH: f64 = 560.0;
+const CLIPBOARD_PREVIEW_PANEL_HEIGHT: f64 = 520.0;
+const CLIPBOARD_PREVIEW_PANEL_MARGIN: f64 = 14.0;
+const CLIPBOARD_PREVIEW_PANEL_RADIUS: f64 = 16.0;
+const CLIPBOARD_PREVIEW_PANEL_PADDING: f64 = 14.0;
 
 /// This sets the activation policy of the app to Accessory, allowing Coco to be visible ontop
 /// of fullscreen apps
@@ -215,6 +106,7 @@ pub(super) fn macos_window_config(handle: &WindowHandle) {
             use objc2_app_kit::{NSFloatingWindowLevel, NSWindowCollectionBehavior};
             ns_window.setLevel(NSFloatingWindowLevel);
             ns_window.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces);
+            ns_window.setHasShadow(true);
 
             // Prevent flickering during window resize:
             // Set window background to fully transparent so resize intermediate frames
@@ -405,6 +297,70 @@ fn make_rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     }
 }
 
+/// Wrap a blur view with a rounded CALayer shadow so the panel keeps
+/// floating depth without revealing square window-corner shadows.
+unsafe fn wrap_blur_effect_with_shadow(
+    effect_view: *mut objc2::runtime::AnyObject,
+    effect_frame: NSRect,
+) -> *mut objc2::runtime::AnyObject {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    if effect_view.is_null() {
+        return effect_view;
+    }
+
+    let view_cls = AnyClass::get(c"NSView").expect("NSView class missing");
+    let color_cls = AnyClass::get(c"NSColor").expect("NSColor class missing");
+
+    let host: *mut AnyObject = msg_send![view_cls, alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: effect_frame];
+    let _: () = msg_send![host, setAutoresizingMask: 18_usize];
+
+    let shadow_carrier: *mut AnyObject = msg_send![view_cls, alloc];
+    let shadow_carrier: *mut AnyObject = msg_send![shadow_carrier, initWithFrame: effect_frame];
+    let _: () = msg_send![shadow_carrier, setAutoresizingMask: 18_usize];
+
+    let yes: bool = true;
+    let _: () = msg_send![shadow_carrier, setWantsLayer: yes];
+    let shadow_layer: *mut AnyObject = msg_send![shadow_carrier, layer];
+    if !shadow_layer.is_null() {
+        let _: () = msg_send![shadow_layer, setCornerRadius: BLUR_CORNER_RADIUS];
+        let _: () = msg_send![shadow_layer, setMasksToBounds: false];
+
+        // Tiny fill establishes a rounded silhouette for the layer shadow.
+        let fill: *mut AnyObject = msg_send![
+            color_cls,
+            colorWithWhite: 0.0_f64,
+            alpha: BLUR_SHADOW_CARRIER_ALPHA
+        ];
+        let cg_fill: *mut CGColor = msg_send![fill, CGColor];
+        let _: () = msg_send![shadow_layer, setBackgroundColor: cg_fill];
+
+        let shadow_color: *mut AnyObject = msg_send![
+            color_cls,
+            colorWithWhite: 0.0_f64,
+            alpha: 1.0_f64
+        ];
+        let cg_shadow: *mut CGColor = msg_send![shadow_color, CGColor];
+        let _: () = msg_send![shadow_layer, setShadowColor: cg_shadow];
+        let _: () = msg_send![shadow_layer, setShadowOpacity: BLUR_SHADOW_OPACITY];
+        let _: () = msg_send![shadow_layer, setShadowRadius: BLUR_SHADOW_RADIUS];
+        let shadow_offset = objc2_foundation::NSSize {
+            width: 0.0,
+            height: BLUR_SHADOW_OFFSET_Y,
+        };
+        let _: () = msg_send![shadow_layer, setShadowOffset: shadow_offset];
+    }
+
+    let _: () = msg_send![effect_view, setFrame: effect_frame];
+    let _: () = msg_send![effect_view, setAutoresizingMask: 18_usize];
+
+    let _: () = msg_send![host, addSubview: shadow_carrier];
+    let _: () = msg_send![host, addSubview: effect_view];
+    host
+}
+
 /// Create a borderless child NSWindow with NSVisualEffectView, positioned
 /// behind the main window. Only the child window provides blur, so
 /// resizing it does NOT trigger wgpu surface recreation (zero flicker).
@@ -448,14 +404,15 @@ pub(super) fn create_blur_child_window(handle: &WindowHandle, width: f64, conten
                     defer: defer
                 ];
 
-                // Transparent, no shadow, non-opaque
+                // Transparent, non-opaque.
+                // Window shadow stays off; we render rounded layer shadow ourselves
+                // to avoid square-corner leakage.
                 let color_cls = AnyClass::get(c"NSColor").unwrap();
                 let clear: *mut AnyObject = msg_send![color_cls, clearColor];
                 let _: () = msg_send![child, setBackgroundColor: clear];
                 let no: bool = false;
                 let _: () = msg_send![child, setOpaque: no];
-                let yes: bool = true;
-                let _: () = msg_send![child, setHasShadow: yes];
+                let _: () = msg_send![child, setHasShadow: no];
 
                 // Same window level as parent
                 let level: isize = msg_send![&*parent, level];
@@ -630,8 +587,9 @@ pub(super) fn create_blur_child_window(handle: &WindowHandle, width: f64, conten
                     ve
                 };
 
-                // Set as content view
-                let _: () = msg_send![child, setContentView: effect_view];
+                // Set as content view with rounded custom shadow wrapper.
+                let wrapped_effect_view = wrap_blur_effect_with_shadow(effect_view, effect_frame);
+                let _: () = msg_send![child, setContentView: wrapped_effect_view];
 
                 // Add as child window, ordered Below (-1)
                 let _: () = msg_send![&*parent, addChildWindow: child, ordered: -1_isize];
@@ -950,8 +908,821 @@ pub(super) fn reveal_in_finder(path: &str) {
     ws.activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&[url]));
 }
 
+/// Paste current clipboard content into the frontmost input target via Cmd+V.
+pub(super) fn paste_to_frontmost(target_pid: Option<i32>) {
+    std::thread::spawn(move || {
+        // Let hide + app activation settle before dispatching Cmd+V.
+        std::thread::sleep(std::time::Duration::from_millis(24));
+        let ax_trusted = ax_process_trusted();
+        coco_log!(
+            "paste_to_frontmost start target_pid={:?} ax_trusted={}",
+            target_pid,
+            ax_trusted
+        );
+        let mut permission_denied = false;
+        let frontmost_ready = wait_for_frontmost_target(target_pid);
+        coco_log!(
+            "paste_to_frontmost frontmost_ready={} target_pid={:?}",
+            frontmost_ready,
+            target_pid
+        );
+
+        // AX route is much faster than spawning osascript when trusted.
+        if ax_trusted {
+            let ax_ok = post_cmd_v_with_ax(target_pid);
+            coco_log!(
+                "paste_to_frontmost ax primary ok={} target_pid={:?}",
+                ax_ok,
+                target_pid
+            );
+            if ax_ok {
+                PASTE_PERMISSION_WARNING.store(false, Ordering::Relaxed);
+                return;
+            }
+        } else {
+            coco_log!("paste_to_frontmost ax primary skipped: AXIsProcessTrusted=false");
+            request_accessibility_permission_prompt_once();
+        }
+
+        let script = r#"
+tell application "System Events"
+    repeat 12 times
+        try
+            set frontName to name of first application process whose frontmost is true
+            if frontName is not "coco" and frontName is not "Coco" then
+                exit repeat
+            end if
+        end try
+        delay 0.01
+    end repeat
+    keystroke "v" using command down
+end tell
+"#;
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        let osascript_ok = match &output {
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                permission_denied =
+                    osascript_permission_denied(&stderr) || osascript_permission_denied(&stdout);
+                coco_log!(
+                    "paste_to_frontmost osascript code={:?} denied={} target_pid={:?} stdout={:?} stderr={:?}",
+                    o.status.code(),
+                    permission_denied,
+                    target_pid,
+                    stdout,
+                    stderr
+                );
+                o.status.success()
+            }
+            Err(err) => {
+                coco_log!("paste_to_frontmost osascript launch failed: {err}");
+                false
+            }
+        };
+
+        if osascript_ok {
+            PASTE_PERMISSION_WARNING.store(false, Ordering::Relaxed);
+            return;
+        }
+
+        let cg_ok = post_cmd_v_with_cg_events();
+        coco_log!("paste_to_frontmost cgevent fallback ok={cg_ok}");
+        if cg_ok {
+            PASTE_PERMISSION_WARNING.store(false, Ordering::Relaxed);
+        } else {
+            let should_warn = permission_denied || !ax_trusted;
+            coco_log!(
+                "paste_to_frontmost failed denied={} ax_trusted={} => warning={}",
+                permission_denied,
+                ax_trusted,
+                should_warn
+            );
+            PASTE_PERMISSION_WARNING.store(should_warn, Ordering::Relaxed);
+        }
+    });
+}
+
+fn ax_process_trusted() -> bool {
+    unsafe { objc2_application_services::AXIsProcessTrusted() }
+}
+
+fn wait_for_frontmost_target(target_pid: Option<i32>) -> bool {
+    use objc2_app_kit::NSWorkspace;
+
+    for attempt in 0..26 {
+        let ws = NSWorkspace::sharedWorkspace();
+        if let Some(app) = ws.frontmostApplication() {
+            let pid = app.processIdentifier();
+            let name = app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let is_coco = name.eq_ignore_ascii_case("coco");
+            let ready = match target_pid {
+                Some(expected) if expected > 0 => pid == expected,
+                _ => !is_coco,
+            };
+            if ready {
+                return true;
+            }
+            if attempt == 0 || attempt == 25 {
+                coco_log!(
+                    "wait_for_frontmost_target attempt={} frontmost pid={} name={} expected={:?}",
+                    attempt,
+                    pid,
+                    name,
+                    target_pid
+                );
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+fn request_accessibility_permission_prompt_once() {
+    if AX_PROMPT_REQUESTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    request_accessibility_permission_prompt();
+}
+
+fn request_accessibility_permission_prompt() {
+    use objc2_application_services::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFString, kCFBooleanTrue};
+
+    let Some(true_value) = (unsafe { kCFBooleanTrue }) else {
+        coco_log!("request_accessibility_permission_prompt: kCFBooleanTrue unavailable");
+        return;
+    };
+
+    let prompt_key: &CFString = unsafe { kAXTrustedCheckOptionPrompt };
+    let options = CFDictionary::<CFString, CFBoolean>::from_slices(&[prompt_key], &[true_value]);
+    let options_typed: &CFDictionary<CFString, CFBoolean> = &options;
+    let options_untyped: &objc2_core_foundation::CFDictionary = options_typed.as_ref();
+    let trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options_untyped)) };
+    coco_log!("request_accessibility_permission_prompt trusted_after_call={trusted}");
+}
+
+fn post_cmd_v_with_ax(_target_pid: Option<i32>) -> bool {
+    use objc2_application_services::{AXError, AXUIElement};
+    use objc2_core_graphics::{CGCharCode, CGKeyCode};
+
+    const KEY_COMMAND: CGKeyCode = 0x37;
+    const KEY_V: CGKeyCode = 0x09;
+    const CHAR_NONE: CGCharCode = 0;
+    let app = unsafe { AXUIElement::new_system_wide() };
+
+    #[allow(deprecated)]
+    fn post(app: &AXUIElement, key_char: CGCharCode, key_code: CGKeyCode, down: bool) -> AXError {
+        unsafe { app.post_keyboard_event(key_char, key_code, down) }
+    }
+
+    let cmd_down = post(&app, CHAR_NONE, KEY_COMMAND, true);
+    let v_down = post(&app, CHAR_NONE, KEY_V, true);
+    let v_up = post(&app, CHAR_NONE, KEY_V, false);
+    let cmd_up = post(&app, CHAR_NONE, KEY_COMMAND, false);
+    coco_log!(
+        "post_cmd_v_with_ax errs: cmd_down={:?} v_down={:?} v_up={:?} cmd_up={:?}",
+        cmd_down,
+        v_down,
+        v_up,
+        cmd_up
+    );
+
+    cmd_down == AXError::Success
+        && v_down == AXError::Success
+        && v_up == AXError::Success
+        && cmd_up == AXError::Success
+}
+
+fn post_cmd_v_with_cg_events() -> bool {
+    use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+
+    const KEY_V: CGKeyCode = 0x09;
+    let preflight = objc2_core_graphics::CGPreflightPostEventAccess();
+    coco_log!("post_cmd_v_with_cg_events preflight_post_access={preflight}");
+    if !preflight {
+        return false;
+    }
+
+    let Some(key_down) = CGEvent::new_keyboard_event(None, KEY_V, true) else {
+        coco_log!("post_cmd_v_with_cg_events failed: key_down event create");
+        return false;
+    };
+    let Some(key_up) = CGEvent::new_keyboard_event(None, KEY_V, false) else {
+        coco_log!("post_cmd_v_with_cg_events failed: key_up event create");
+        return false;
+    };
+
+    CGEvent::set_flags(Some(&key_down), CGEventFlags::MaskCommand);
+    CGEvent::set_flags(Some(&key_up), CGEventFlags::MaskCommand);
+    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&key_down));
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&key_up));
+    true
+}
+
+fn osascript_permission_denied(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not allowed to send keystrokes")
+        || lower.contains("1002")
+        || stderr.contains("不允许发送按键")
+}
+
+pub(super) fn paste_permission_warning_active() -> bool {
+    PASTE_PERMISSION_WARNING.load(Ordering::Relaxed)
+}
+
+pub(super) fn accessibility_permission_granted() -> bool {
+    ax_process_trusted()
+}
+
+/// Preview clipboard content with macOS Quick Look (native space-preview style).
+pub(super) fn quick_look_clipboard_content(
+    entry_id: u64,
+    content: &crate::clipboard::ClipBoardContentType,
+) {
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join("coco-quicklook");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        coco_log!("quick look: create temp dir failed: {err}");
+        return;
+    }
+
+    let path = match content {
+        crate::clipboard::ClipBoardContentType::Text(text) => {
+            let path = dir.join(format!("clipboard-{entry_id}.txt"));
+            if let Err(err) = std::fs::write(&path, text) {
+                coco_log!("quick look: write text failed: {err}");
+                return;
+            }
+            path
+        }
+        crate::clipboard::ClipBoardContentType::Image(img) => {
+            let path = dir.join(format!("clipboard-{entry_id}.png"));
+            if let Err(err) = image::save_buffer_with_format(
+                &path,
+                img.bytes.as_ref(),
+                img.width as u32,
+                img.height as u32,
+                image::ColorType::Rgba8,
+                image::ImageFormat::Png,
+            ) {
+                coco_log!("quick look: write image failed: {err}");
+                return;
+            }
+            path
+        }
+    };
+
+    let _ = Command::new("qlmanage")
+        .arg("-p")
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn clipboard_preview_text(text: &str) -> String {
+    const MAX_CHARS: usize = 20_000;
+    if text.chars().count() > MAX_CHARS {
+        let mut clipped = text.chars().take(MAX_CHARS).collect::<String>();
+        clipped.push_str("...");
+        clipped
+    } else {
+        text.to_owned()
+    }
+}
+
+fn media_video_path_from_text(text: &str) -> Option<std::path::PathBuf> {
+    let raw = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let path = if let Some(rest) = raw.strip_prefix("file://") {
+        if let Some(localhost_path) = rest.strip_prefix("localhost/") {
+            std::path::PathBuf::from(format!("/{}", localhost_path))
+        } else {
+            std::path::PathBuf::from(rest)
+        }
+    } else {
+        std::path::PathBuf::from(raw.trim_matches('"'))
+    };
+
+    if !path.exists() || !path.is_file() {
+        return None;
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())?;
+    let is_video = matches!(
+        ext.as_str(),
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "flv"
+    );
+    if !is_video {
+        return None;
+    }
+
+    std::fs::canonicalize(path).ok()
+}
+
+fn clipboard_preview_panel_size(_parent_height: f64) -> (f64, f64) {
+    (
+        CLIPBOARD_PREVIEW_PANEL_WIDTH,
+        CLIPBOARD_PREVIEW_PANEL_HEIGHT,
+    )
+}
+
+unsafe fn ensure_clipboard_preview_panel() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    if CLIPBOARD_PREVIEW_PANEL.load(Ordering::Relaxed) != 0 {
+        return true;
+    }
+
+    let main_ptr = MAIN_WINDOW.load(Ordering::Relaxed);
+    if main_ptr == 0 {
+        coco_log!("clipboard preview: main window missing");
+        return false;
+    }
+    let parent = main_ptr as *mut AnyObject;
+    let parent_frame: NSRect = unsafe { msg_send![parent, frame] };
+    let (panel_w, panel_h) = clipboard_preview_panel_size(parent_frame.size.height);
+    let panel_frame = make_rect(0.0, 0.0, panel_w, panel_h);
+
+    let Some(panel_cls) = AnyClass::get(c"NSPanel") else {
+        coco_log!("clipboard preview: NSPanel class missing");
+        return false;
+    };
+    let panel: *mut AnyObject = unsafe { msg_send![panel_cls, alloc] };
+    let style_mask: usize = 0; // borderless
+    let backing: usize = 2; // NSBackingStoreBuffered
+    let defer: bool = false;
+    let panel: *mut AnyObject = unsafe {
+        msg_send![
+            panel,
+            initWithContentRect: panel_frame,
+            styleMask: style_mask,
+            backing: backing,
+            defer: defer
+        ]
+    };
+    if panel.is_null() {
+        coco_log!("clipboard preview: init panel failed");
+        return false;
+    }
+
+    let color_cls = AnyClass::get(c"NSColor").expect("NSColor class missing");
+    let clear: *mut AnyObject = unsafe { msg_send![color_cls, clearColor] };
+    let yes: bool = true;
+    let no: bool = false;
+    let _: () = unsafe { msg_send![panel, setBackgroundColor: clear] };
+    let _: () = unsafe { msg_send![panel, setOpaque: no] };
+    let _: () = unsafe { msg_send![panel, setHasShadow: yes] };
+    let _: () = unsafe { msg_send![panel, setIgnoresMouseEvents: no] };
+    let _: () = unsafe { msg_send![panel, setMovableByWindowBackground: no] };
+    let _: () = unsafe { msg_send![panel, setReleasedWhenClosed: no] };
+    let _: () = unsafe { msg_send![panel, setHidesOnDeactivate: yes] };
+    let _: () = unsafe { msg_send![panel, setFloatingPanel: yes] };
+    let _: () = unsafe { msg_send![panel, setBecomesKeyOnlyIfNeeded: yes] };
+
+    let level: isize = unsafe { msg_send![parent, level] };
+    let _: () = unsafe { msg_send![panel, setLevel: level] };
+
+    let effect_cls = AnyClass::get(c"NSVisualEffectView").expect("NSVisualEffectView missing");
+    let effect: *mut AnyObject = unsafe { msg_send![effect_cls, alloc] };
+    let effect: *mut AnyObject = unsafe { msg_send![effect, initWithFrame: panel_frame] };
+    let _: () = unsafe { msg_send![effect, setMaterial: 6_isize] }; // Popover
+    let _: () = unsafe { msg_send![effect, setBlendingMode: 0_isize] };
+    let _: () = unsafe { msg_send![effect, setState: 1_isize] };
+    let _: () = unsafe { msg_send![effect, setEmphasized: no] };
+    let _: () = unsafe { msg_send![effect, setAutoresizingMask: 18_usize] };
+    let _: () = unsafe { msg_send![effect, setWantsLayer: yes] };
+    let layer: *mut AnyObject = unsafe { msg_send![effect, layer] };
+    if !layer.is_null() {
+        let _: () = unsafe { msg_send![layer, setCornerRadius: CLIPBOARD_PREVIEW_PANEL_RADIUS] };
+        let _: () = unsafe { msg_send![layer, setMasksToBounds: yes] };
+        let border: *mut AnyObject = unsafe {
+            msg_send![
+                color_cls,
+                colorWithWhite: 1.0_f64,
+                alpha: 0.15_f64
+            ]
+        };
+        let cg_border: *mut CGColor = unsafe { msg_send![border, CGColor] };
+        let _: () = unsafe { msg_send![layer, setBorderColor: cg_border] };
+        let _: () = unsafe { msg_send![layer, setBorderWidth: 1.0_f64] };
+    }
+
+    let content_w = (panel_w - CLIPBOARD_PREVIEW_PANEL_PADDING * 2.0).max(1.0);
+    let content_h = (panel_h - CLIPBOARD_PREVIEW_PANEL_PADDING * 2.0).max(1.0);
+    let content_frame = make_rect(
+        CLIPBOARD_PREVIEW_PANEL_PADDING,
+        CLIPBOARD_PREVIEW_PANEL_PADDING,
+        content_w,
+        content_h,
+    );
+
+    let scroll_cls = AnyClass::get(c"NSScrollView").expect("NSScrollView missing");
+    let text_scroll: *mut AnyObject = unsafe { msg_send![scroll_cls, alloc] };
+    let text_scroll: *mut AnyObject =
+        unsafe { msg_send![text_scroll, initWithFrame: content_frame] };
+    let _: () = unsafe { msg_send![text_scroll, setAutoresizingMask: 18_usize] };
+    let _: () = unsafe { msg_send![text_scroll, setHasVerticalScroller: yes] };
+    let _: () = unsafe { msg_send![text_scroll, setHasHorizontalScroller: no] };
+    let _: () = unsafe { msg_send![text_scroll, setAutohidesScrollers: yes] };
+    let _: () = unsafe { msg_send![text_scroll, setBorderType: 0_isize] };
+    let _: () = unsafe { msg_send![text_scroll, setDrawsBackground: no] };
+
+    let text_cls = AnyClass::get(c"NSTextView").expect("NSTextView missing");
+    let text_view: *mut AnyObject = unsafe { msg_send![text_cls, alloc] };
+    let text_view: *mut AnyObject = unsafe {
+        msg_send![
+            text_view,
+            initWithFrame: make_rect(0.0, 0.0, content_w, content_h)
+        ]
+    };
+    let _: () = unsafe { msg_send![text_view, setAutoresizingMask: 18_usize] };
+    let _: () = unsafe { msg_send![text_view, setEditable: no] };
+    let _: () = unsafe { msg_send![text_view, setSelectable: yes] };
+    let _: () = unsafe { msg_send![text_view, setRichText: no] };
+    let _: () = unsafe { msg_send![text_view, setImportsGraphics: no] };
+    let _: () = unsafe { msg_send![text_view, setDrawsBackground: no] };
+    let _: () = unsafe { msg_send![text_view, setHorizontallyResizable: no] };
+    let _: () = unsafe { msg_send![text_view, setVerticallyResizable: yes] };
+    let _: () = unsafe { msg_send![text_scroll, setDocumentView: text_view] };
+
+    let image_view_cls = AnyClass::get(c"NSImageView").expect("NSImageView missing");
+    let image_view: *mut AnyObject = unsafe { msg_send![image_view_cls, alloc] };
+    let image_view: *mut AnyObject = unsafe { msg_send![image_view, initWithFrame: content_frame] };
+    let _: () = unsafe { msg_send![image_view, setAutoresizingMask: 18_usize] };
+    let _: () = unsafe { msg_send![image_view, setImageScaling: 3_isize] };
+    let _: () = unsafe { msg_send![image_view, setImageAlignment: 0_isize] };
+    let _: () = unsafe { msg_send![image_view, setHidden: yes] };
+
+    let mut video_view: *mut AnyObject = std::ptr::null_mut();
+    if let Some(video_view_cls) = AnyClass::get(c"AVPlayerView") {
+        let vv_alloc: *mut AnyObject = unsafe { msg_send![video_view_cls, alloc] };
+        video_view = unsafe { msg_send![vv_alloc, initWithFrame: content_frame] };
+        if !video_view.is_null() {
+            let _: () = unsafe { msg_send![video_view, setAutoresizingMask: 18_usize] };
+            let _: () = unsafe { msg_send![video_view, setHidden: yes] };
+        }
+    } else {
+        coco_log!("clipboard preview: AVPlayerView unavailable, video preview disabled");
+    }
+
+    let _: () = unsafe { msg_send![effect, addSubview: text_scroll] };
+    let _: () = unsafe { msg_send![effect, addSubview: image_view] };
+    if !video_view.is_null() {
+        let _: () = unsafe { msg_send![effect, addSubview: video_view] };
+    }
+    let _: () = unsafe { msg_send![panel, setContentView: effect] };
+
+    CLIPBOARD_PREVIEW_PANEL.store(panel as usize, Ordering::Relaxed);
+    CLIPBOARD_PREVIEW_TEXT_SCROLL.store(text_scroll as usize, Ordering::Relaxed);
+    CLIPBOARD_PREVIEW_TEXT_VIEW.store(text_view as usize, Ordering::Relaxed);
+    CLIPBOARD_PREVIEW_IMAGE_VIEW.store(image_view as usize, Ordering::Relaxed);
+    CLIPBOARD_PREVIEW_VIDEO_VIEW.store(video_view as usize, Ordering::Relaxed);
+    CLIPBOARD_PREVIEW_PLAYER.store(0, Ordering::Relaxed);
+
+    true
+}
+
+unsafe fn attach_clipboard_preview_panel_to_main(panel: *mut objc2::runtime::AnyObject) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    if panel.is_null() {
+        return;
+    }
+    let main_ptr = MAIN_WINDOW.load(Ordering::Relaxed);
+    if main_ptr == 0 {
+        return;
+    }
+    let main_window = main_ptr as *mut AnyObject;
+    let parent: *mut AnyObject = unsafe { msg_send![panel, parentWindow] };
+    if !parent.is_null() && parent != main_window {
+        let _: () = unsafe { msg_send![parent, removeChildWindow: panel] };
+    }
+    if parent != main_window {
+        let _: () = unsafe { msg_send![main_window, addChildWindow: panel, ordered: 1_isize] };
+    }
+    let level: isize = unsafe { msg_send![main_window, level] };
+    let _: () = unsafe { msg_send![panel, setLevel: level] };
+}
+
+unsafe fn position_clipboard_preview_panel(panel: *mut objc2::runtime::AnyObject) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    if panel.is_null() {
+        return;
+    }
+    let main_ptr = MAIN_WINDOW.load(Ordering::Relaxed);
+    if main_ptr == 0 {
+        return;
+    }
+    let main_window = main_ptr as *mut AnyObject;
+    let parent_frame: NSRect = unsafe { msg_send![main_window, frame] };
+    let (panel_w, panel_h) = clipboard_preview_panel_size(parent_frame.size.height);
+
+    let x = parent_frame.origin.x + ((parent_frame.size.width - panel_w) * 0.5).round();
+    let y = (parent_frame.origin.y + (parent_frame.size.height - panel_h) * 0.5).round();
+    let frame = make_rect(x, y.max(CLIPBOARD_PREVIEW_PANEL_MARGIN), panel_w, panel_h);
+
+    let yes: bool = true;
+    let _: () = unsafe { msg_send![panel, setFrame: frame, display: yes] };
+
+    let content: *mut AnyObject = unsafe { msg_send![panel, contentView] };
+    if !content.is_null() {
+        let _: () = unsafe { msg_send![content, setFrame: make_rect(0.0, 0.0, panel_w, panel_h)] };
+    }
+
+    let content_w = (panel_w - CLIPBOARD_PREVIEW_PANEL_PADDING * 2.0).max(1.0);
+    let content_h = (panel_h - CLIPBOARD_PREVIEW_PANEL_PADDING * 2.0).max(1.0);
+    let content_frame = make_rect(
+        CLIPBOARD_PREVIEW_PANEL_PADDING,
+        CLIPBOARD_PREVIEW_PANEL_PADDING,
+        content_w,
+        content_h,
+    );
+    let text_scroll_ptr = CLIPBOARD_PREVIEW_TEXT_SCROLL.load(Ordering::Relaxed);
+    if text_scroll_ptr != 0 {
+        let text_scroll = text_scroll_ptr as *mut AnyObject;
+        let _: () = unsafe { msg_send![text_scroll, setFrame: content_frame] };
+    }
+    let image_view_ptr = CLIPBOARD_PREVIEW_IMAGE_VIEW.load(Ordering::Relaxed);
+    if image_view_ptr != 0 {
+        let image_view = image_view_ptr as *mut AnyObject;
+        let _: () = unsafe { msg_send![image_view, setFrame: content_frame] };
+    }
+    let video_view_ptr = CLIPBOARD_PREVIEW_VIDEO_VIEW.load(Ordering::Relaxed);
+    if video_view_ptr != 0 {
+        let video_view = video_view_ptr as *mut AnyObject;
+        let _: () = unsafe { msg_send![video_view, setFrame: content_frame] };
+    }
+}
+
+unsafe fn stop_video_preview() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let player_ptr = CLIPBOARD_PREVIEW_PLAYER.swap(0, Ordering::Relaxed);
+    if player_ptr != 0 {
+        let player = player_ptr as *mut AnyObject;
+        let _: () = unsafe { msg_send![player, pause] };
+    }
+
+    let video_view_ptr = CLIPBOARD_PREVIEW_VIDEO_VIEW.load(Ordering::Relaxed);
+    if video_view_ptr != 0 {
+        let video_view = video_view_ptr as *mut AnyObject;
+        let null_player: *mut AnyObject = std::ptr::null_mut();
+        let yes: bool = true;
+        let _: () = unsafe { msg_send![video_view, setPlayer: null_player] };
+        let _: () = unsafe { msg_send![video_view, setHidden: yes] };
+    }
+}
+
+unsafe fn show_video_preview(path: &std::path::Path) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+
+    let text_scroll_ptr = CLIPBOARD_PREVIEW_TEXT_SCROLL.load(Ordering::Relaxed);
+    let image_view_ptr = CLIPBOARD_PREVIEW_IMAGE_VIEW.load(Ordering::Relaxed);
+    let video_view_ptr = CLIPBOARD_PREVIEW_VIDEO_VIEW.load(Ordering::Relaxed);
+    if text_scroll_ptr == 0 || image_view_ptr == 0 || video_view_ptr == 0 {
+        return false;
+    }
+    let text_scroll = text_scroll_ptr as *mut AnyObject;
+    let image_view = image_view_ptr as *mut AnyObject;
+    let video_view = video_view_ptr as *mut AnyObject;
+
+    let Some(url_cls) = AnyClass::get(c"NSURL") else {
+        return false;
+    };
+    let Some(player_cls) = AnyClass::get(c"AVPlayer") else {
+        return false;
+    };
+
+    let path_string = path.to_string_lossy().to_string();
+    let ns_path = NSString::from_str(&path_string);
+    let ns_url: *mut AnyObject = unsafe { msg_send![url_cls, fileURLWithPath: &*ns_path] };
+    if ns_url.is_null() {
+        return false;
+    }
+    let player: *mut AnyObject = unsafe { msg_send![player_cls, playerWithURL: ns_url] };
+    if player.is_null() {
+        return false;
+    }
+
+    unsafe { stop_video_preview() };
+
+    let yes: bool = true;
+    let no: bool = false;
+    let _: () = unsafe { msg_send![text_scroll, setHidden: yes] };
+    let _: () = unsafe { msg_send![image_view, setHidden: yes] };
+    let _: () = unsafe { msg_send![video_view, setHidden: no] };
+    let _: () = unsafe { msg_send![video_view, setPlayer: player] };
+    let _: () = unsafe { msg_send![player, play] };
+    CLIPBOARD_PREVIEW_PLAYER.store(player as usize, Ordering::Relaxed);
+    true
+}
+
+unsafe fn show_text_preview(text: &str) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    unsafe { stop_video_preview() };
+
+    let text_view_ptr = CLIPBOARD_PREVIEW_TEXT_VIEW.load(Ordering::Relaxed);
+    let text_scroll_ptr = CLIPBOARD_PREVIEW_TEXT_SCROLL.load(Ordering::Relaxed);
+    let image_view_ptr = CLIPBOARD_PREVIEW_IMAGE_VIEW.load(Ordering::Relaxed);
+    if text_view_ptr == 0 || text_scroll_ptr == 0 || image_view_ptr == 0 {
+        return;
+    }
+
+    let text_view = text_view_ptr as *mut AnyObject;
+    let text_scroll = text_scroll_ptr as *mut AnyObject;
+    let image_view = image_view_ptr as *mut AnyObject;
+
+    let ns_text = NSString::from_str(&clipboard_preview_text(text));
+    let _: () = unsafe { msg_send![text_view, setString: &*ns_text] };
+
+    let yes: bool = true;
+    let no: bool = false;
+    let _: () = unsafe { msg_send![text_scroll, setHidden: no] };
+    let _: () = unsafe { msg_send![image_view, setHidden: yes] };
+
+    let clip_view: *mut AnyObject = unsafe { msg_send![text_scroll, contentView] };
+    if !clip_view.is_null() {
+        let origin = objc2_foundation::NSPoint { x: 0.0, y: 0.0 };
+        let _: () = unsafe { msg_send![clip_view, scrollToPoint: origin] };
+        let _: () = unsafe { msg_send![text_scroll, reflectScrolledClipView: clip_view] };
+    }
+}
+
+unsafe fn show_image_preview(img: &arboard::ImageData<'static>) {
+    use image::ImageEncoder;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    unsafe { stop_video_preview() };
+
+    let text_scroll_ptr = CLIPBOARD_PREVIEW_TEXT_SCROLL.load(Ordering::Relaxed);
+    let image_view_ptr = CLIPBOARD_PREVIEW_IMAGE_VIEW.load(Ordering::Relaxed);
+    if text_scroll_ptr == 0 || image_view_ptr == 0 {
+        return;
+    }
+
+    let text_scroll = text_scroll_ptr as *mut AnyObject;
+    let image_view = image_view_ptr as *mut AnyObject;
+
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    if let Err(err) = encoder.write_image(
+        img.bytes.as_ref(),
+        img.width as u32,
+        img.height as u32,
+        image::ExtendedColorType::Rgba8,
+    ) {
+        coco_log!("clipboard preview: encode image failed: {err}");
+        return;
+    }
+
+    let Some(data_cls) = AnyClass::get(c"NSData") else {
+        coco_log!("clipboard preview: NSData class missing");
+        return;
+    };
+    let ns_data: *mut AnyObject = unsafe {
+        msg_send![
+            data_cls,
+            dataWithBytes: png.as_ptr().cast::<std::ffi::c_void>(),
+            length: png.len()
+        ]
+    };
+    if ns_data.is_null() {
+        coco_log!("clipboard preview: NSData creation failed");
+        return;
+    }
+
+    let Some(image_cls) = AnyClass::get(c"NSImage") else {
+        coco_log!("clipboard preview: NSImage class missing");
+        return;
+    };
+    let ns_image: *mut AnyObject = unsafe { msg_send![image_cls, alloc] };
+    let ns_image: *mut AnyObject = unsafe { msg_send![ns_image, initWithData: ns_data] };
+    if ns_image.is_null() {
+        coco_log!("clipboard preview: NSImage initWithData failed");
+        return;
+    }
+
+    let _: () = unsafe { msg_send![image_view, setImage: ns_image] };
+    let yes: bool = true;
+    let no: bool = false;
+    let _: () = unsafe { msg_send![text_scroll, setHidden: yes] };
+    let _: () = unsafe { msg_send![image_view, setHidden: no] };
+}
+
+unsafe fn update_clipboard_preview_content(content: &crate::clipboard::ClipBoardContentType) {
+    match content {
+        crate::clipboard::ClipBoardContentType::Text(text) => unsafe {
+            if let Some(path) = media_video_path_from_text(text)
+                && show_video_preview(&path)
+            {
+                return;
+            }
+            show_text_preview(text);
+        },
+        crate::clipboard::ClipBoardContentType::Image(img) => unsafe {
+            show_image_preview(img);
+        },
+    }
+}
+
+/// Show the native clipboard preview panel above the launcher window.
+pub(super) fn show_clipboard_preview_panel(content: &crate::clipboard::ClipBoardContentType) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    unsafe {
+        if !ensure_clipboard_preview_panel() {
+            return;
+        }
+        let panel_ptr = CLIPBOARD_PREVIEW_PANEL.load(Ordering::Relaxed);
+        if panel_ptr == 0 {
+            return;
+        }
+        let panel = panel_ptr as *mut AnyObject;
+        attach_clipboard_preview_panel_to_main(panel);
+        position_clipboard_preview_panel(panel);
+        update_clipboard_preview_content(content);
+        let null: *const AnyObject = std::ptr::null();
+        let _: () = msg_send![panel, orderFront: null];
+    }
+}
+
+/// Update preview panel content while keeping it visible.
+pub(super) fn update_clipboard_preview_panel(content: &crate::clipboard::ClipBoardContentType) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    unsafe {
+        if CLIPBOARD_PREVIEW_PANEL.load(Ordering::Relaxed) == 0 {
+            show_clipboard_preview_panel(content);
+            return;
+        }
+        let panel = CLIPBOARD_PREVIEW_PANEL.load(Ordering::Relaxed) as *mut AnyObject;
+        if panel.is_null() {
+            show_clipboard_preview_panel(content);
+            return;
+        }
+        attach_clipboard_preview_panel_to_main(panel);
+        position_clipboard_preview_panel(panel);
+        update_clipboard_preview_content(content);
+        let null: *const AnyObject = std::ptr::null();
+        let _: () = msg_send![panel, orderFront: null];
+    }
+}
+
+/// Hide (but keep) the native clipboard preview panel.
+pub(super) fn hide_clipboard_preview_panel() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let panel_ptr = CLIPBOARD_PREVIEW_PANEL.load(Ordering::Relaxed);
+    if panel_ptr == 0 {
+        return;
+    }
+
+    unsafe {
+        stop_video_preview();
+        let panel = panel_ptr as *mut AnyObject;
+        let parent: *mut AnyObject = msg_send![panel, parentWindow];
+        if !parent.is_null() {
+            let _: () = msg_send![parent, removeChildWindow: panel];
+        }
+        let null: *const AnyObject = std::ptr::null();
+        let _: () = msg_send![panel, orderOut: null];
+    }
+}
+
 /// Open System Settings to the Accessibility pane.
 pub(super) fn open_accessibility_settings() {
+    request_accessibility_permission_prompt_once();
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
@@ -1069,8 +1840,8 @@ pub(super) fn store_main_window(handle: &WindowHandle) {
     }
 }
 
-// Spotlight-style in-place zoom. Keep subtle to reduce NSWindow-bound clipping.
-const SHOW_SCALE_HIDDEN: f64 = 1.02;
+// Fade-only show/hide (no scale) to avoid clipping/desync artifacts.
+const SHOW_SCALE_HIDDEN: f64 = 1.0;
 const SHOW_ANIM_DURATION_SECS: f64 = 0.200;
 const HIDE_ANIM_DURATION_SECS: f64 = 0.150;
 

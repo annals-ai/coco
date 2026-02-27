@@ -4,6 +4,7 @@
 //! - `100 usd to cny`  /  `100 usd in cny`  /  `100 usd cny`
 //! - `$100 to cny`  /  `¥100`  /  `€50 gbp`  /  `£30`
 //! - `100$`  /  `100¥`  /  `100€`  /  `100£`
+//! - `tw20-rmb`  /  `$100-¥`  /  `$100-rmb`  /  `$100-cn`
 
 use std::{
     collections::HashMap,
@@ -12,6 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use chrono::DateTime;
 use once_cell::sync::Lazy;
 
 /// A currency definition.
@@ -31,7 +33,6 @@ pub struct CurrencyResult {
     pub target_value: f64,
     pub target_code: &'static str,
     pub rate: f64,
-    pub updated_at: String,
 }
 
 struct ParsedCurrencyQuery {
@@ -236,6 +237,25 @@ const SYMBOL_MAP: &[(&str, &str)] = &[
     ("₺", "TRY"),
 ];
 
+/// Common short aliases.
+const ALIAS_MAP: &[(&str, &str)] = &[
+    ("rmb", "CNY"),
+    ("cnh", "CNY"),
+    ("cn", "CNY"),
+    ("yuan", "CNY"),
+    ("tw", "TWD"),
+    ("ntd", "TWD"),
+    ("us", "USD"),
+    ("dollar", "USD"),
+    ("eu", "EUR"),
+    ("uk", "GBP"),
+    ("gb", "GBP"),
+    ("jp", "JPY"),
+    ("yen", "JPY"),
+    ("hk", "HKD"),
+    ("kr", "KRW"),
+];
+
 /// Default currencies to show when no target is specified.
 const DEFAULT_TARGETS: &[&str] = &["CNY", "USD", "EUR", "GBP", "JPY", "KRW", "HKD", "CAD"];
 
@@ -323,7 +343,6 @@ pub fn convert_query(query: &str) -> Option<Vec<CurrencyResult>> {
             target_value,
             target_code: target.code,
             rate,
-            updated_at: cache.last_updated.clone(),
         });
     }
 
@@ -371,12 +390,31 @@ pub fn currency_flag(code: &str) -> &'static str {
     find_currency_by_code(code).map_or("", |c| c.flag)
 }
 
+/// Last exchange-rate update label (already normalized for display).
+pub fn last_updated_label() -> String {
+    RATE_CACHE
+        .read()
+        .map(|cache| cache.last_updated.clone())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
 fn parse_currency_query(query: &str) -> Option<ParsedCurrencyQuery> {
-    let q = query.trim();
+    let normalized = normalize_query(query);
+    let q = normalized.trim();
     if q.is_empty() {
         return None;
+    }
+
+    // Try compact shorthand: `tw20-rmb`, `$100-¥`, `100usd-cny`
+    if let Some(parsed) = try_parse_dash_shorthand(q) {
+        return Some(parsed);
+    }
+
+    // Try compact source-value without dash: `jp12000`, `rmb100 hk`
+    if let Some(parsed) = try_parse_compact_source_value_query(q) {
+        return Some(parsed);
     }
 
     // Try symbol-prefixed: `$100`, `¥50.5`, `€200 gbp`
@@ -391,6 +429,103 @@ fn parse_currency_query(query: &str) -> Option<ParsedCurrencyQuery> {
 
     // Try code-based: `100 usd to cny`, `100 usd cny`, `100 usd`
     try_parse_code_based(q)
+}
+
+fn normalize_query(query: &str) -> String {
+    query
+        .trim()
+        .chars()
+        .map(|c| match c {
+            // Common full-width/typographic dash variants from CJK keyboards/IMEs.
+            '－' | '—' | '–' | '−' => '-',
+            _ => c,
+        })
+        .collect()
+}
+
+fn try_parse_dash_shorthand(q: &str) -> Option<ParsedCurrencyQuery> {
+    let (left, right) = q.split_once('-')?;
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return None;
+    }
+
+    let (source, value) = parse_compact_source_value(left)?;
+    if value == 0.0 {
+        return None;
+    }
+    let target = parse_currency_token(right)?;
+
+    Some(ParsedCurrencyQuery {
+        value,
+        source,
+        target: Some(target),
+    })
+}
+
+fn try_parse_compact_source_value_query(q: &str) -> Option<ParsedCurrencyQuery> {
+    let q = q.trim();
+    if q.is_empty() {
+        return None;
+    }
+
+    let split_idx = q.find(char::is_whitespace).unwrap_or(q.len());
+    let left = &q[..split_idx];
+    let right = q[split_idx..].trim_start();
+
+    let (source, value) = parse_compact_source_value(left)?;
+    if value == 0.0 {
+        return None;
+    }
+
+    let target = if right.is_empty() {
+        None
+    } else {
+        Some(parse_optional_target(right)?)
+    };
+
+    Some(ParsedCurrencyQuery {
+        value,
+        source,
+        target,
+    })
+}
+
+fn parse_compact_source_value(s: &str) -> Option<(&'static CurrencyDef, f64)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // `$100` / `¥500`
+    for &(symbol, code) in SYMBOL_MAP {
+        if !s.starts_with(symbol) {
+            continue;
+        }
+        let (value, rest) = parse_number_prefix(&s[symbol.len()..])?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        return Some((find_currency_by_code(code)?, value));
+    }
+
+    // `tw20` / `usd100`
+    let token_end = s
+        .char_indices()
+        .take_while(|&(_, c)| c.is_ascii_alphabetic())
+        .last()
+        .map_or(0, |(idx, c)| idx + c.len_utf8());
+
+    if token_end > 0 && token_end < s.len() {
+        let token = &s[..token_end];
+        let (value, rest) = parse_number_prefix(&s[token_end..])?;
+        if rest.trim().is_empty() {
+            return Some((parse_currency_token(token)?, value));
+        }
+    }
+
+    // `100$` / `100 usd`
+    let (value, rest) = parse_number_prefix(s)?;
+    Some((parse_currency_token(rest)?, value))
 }
 
 fn try_parse_symbol_prefix(q: &str) -> Option<ParsedCurrencyQuery> {
@@ -451,13 +586,13 @@ fn try_parse_code_based(q: &str) -> Option<ParsedCurrencyQuery> {
         return None;
     }
 
-    let source = find_currency(tokens[0])?;
+    let source = parse_currency_token(tokens[0])?;
 
     let target = match tokens.len() {
         1 => None,
-        2 => Some(find_currency(tokens[1])?),
+        2 => Some(parse_currency_token(tokens[1])?),
         3 if tokens[1].eq_ignore_ascii_case("to") || tokens[1].eq_ignore_ascii_case("in") => {
-            Some(find_currency(tokens[2])?)
+            Some(parse_currency_token(tokens[2])?)
         }
         _ => return None,
     };
@@ -470,15 +605,28 @@ fn try_parse_code_based(q: &str) -> Option<ParsedCurrencyQuery> {
 }
 
 fn parse_optional_target(s: &str) -> Option<&'static CurrencyDef> {
-    let s = s.trim();
+    let mut s = s.trim();
     if s.is_empty() {
         return None;
     }
+
+    // Support shorthand target separator: `$100-rmb`, `$100-¥`
+    if let Some(rest) = s.strip_prefix('-') {
+        s = rest.trim_start();
+        if s.is_empty() {
+            return None;
+        }
+    }
+
+    if let Some(target) = parse_currency_token(s) {
+        return Some(target);
+    }
+
     let tokens: Vec<&str> = s.split_whitespace().collect();
     match tokens.len() {
-        1 => find_currency(tokens[0]),
+        1 => parse_currency_token(tokens[0]),
         2 if tokens[0].eq_ignore_ascii_case("to") || tokens[0].eq_ignore_ascii_case("in") => {
-            find_currency(tokens[1])
+            parse_currency_token(tokens[1])
         }
         _ => None,
     }
@@ -525,6 +673,29 @@ fn parse_number_prefix(s: &str) -> Option<(f64, &str)> {
     Some((value, rest))
 }
 
+fn parse_currency_token(token: &str) -> Option<&'static CurrencyDef> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    if let Some(c) = find_currency_by_symbol(token) {
+        return Some(c);
+    }
+
+    let normalized = token
+        .trim_matches(|c: char| matches!(c, '-' | '_' | '/'))
+        .to_lowercase();
+    if let Some((_, code)) = ALIAS_MAP
+        .iter()
+        .find(|(alias, _)| *alias == normalized.as_str())
+    {
+        return find_currency_by_code(code);
+    }
+
+    find_currency(token)
+}
+
 /// Find a currency by code (case-insensitive) or Chinese name.
 fn find_currency(token: &str) -> Option<&'static CurrencyDef> {
     let upper = token.to_uppercase();
@@ -534,6 +705,13 @@ fn find_currency(token: &str) -> Option<&'static CurrencyDef> {
     }
     // By Chinese name
     CURRENCIES.iter().find(|c| c.name_cn == token)
+}
+
+fn find_currency_by_symbol(symbol: &str) -> Option<&'static CurrencyDef> {
+    let code = SYMBOL_MAP
+        .iter()
+        .find_map(|(s, code)| (*s == symbol).then_some(*code))?;
+    find_currency_by_code(code)
 }
 
 fn find_currency_by_code(code: &str) -> Option<&'static CurrencyDef> {
@@ -589,12 +767,7 @@ fn fetch_rates_once() {
         .unwrap_or("unknown")
         .to_string();
 
-    // Parse only the date portion for display
-    let display_time = time_str
-        .split(',')
-        .nth(1)
-        .map(|s| s.trim().to_string())
-        .unwrap_or(time_str.clone());
+    let display_time = format_update_date(&time_str);
 
     let mut new_rates = HashMap::new();
     for (code, val) in rates_obj {
@@ -612,6 +785,12 @@ fn fetch_rates_once() {
         cache.last_updated = display_time;
         cache.last_fetch = Some(SystemTime::now());
     }
+}
+
+fn format_update_date(raw: &str) -> String {
+    DateTime::parse_from_rfc2822(raw)
+        .map(|dt| dt.format("%Y/%m/%d").to_string())
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -720,6 +899,77 @@ mod tests {
         let results = convert_query("$100 to cny").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].target_code, "CNY");
+    }
+
+    #[test]
+    fn parse_dash_symbol_to_symbol() {
+        let results = convert_query("$100-¥").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "USD");
+        assert_eq!(results[0].target_code, "CNY");
+    }
+
+    #[test]
+    fn parse_dash_symbol_to_alias() {
+        let results = convert_query("$100-rmb").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "USD");
+        assert_eq!(results[0].target_code, "CNY");
+    }
+
+    #[test]
+    fn parse_dash_symbol_to_country_alias() {
+        let results = convert_query("$100-cn").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "USD");
+        assert_eq!(results[0].target_code, "CNY");
+    }
+
+    #[test]
+    fn parse_dash_compact_source_alias() {
+        let results = convert_query("tw20-rmb").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "TWD");
+        assert_eq!(results[0].target_code, "CNY");
+        assert_eq!(results[0].source_value, 20.0);
+    }
+
+    #[test]
+    fn parse_compact_alias_without_dash_defaults() {
+        let results = convert_query("jp12000").unwrap();
+        assert!(results.len() > 1);
+        assert!(results.iter().all(|r| r.source_code == "JPY"));
+    }
+
+    #[test]
+    fn parse_compact_alias_without_dash_with_target() {
+        let results = convert_query("rmb100 hk").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "CNY");
+        assert_eq!(results[0].target_code, "HKD");
+    }
+
+    #[test]
+    fn parse_compact_country_alias_without_dash_defaults() {
+        let results = convert_query("cn100").unwrap();
+        assert!(results.len() > 1);
+        assert!(results.iter().all(|r| r.source_code == "CNY"));
+    }
+
+    #[test]
+    fn parse_country_alias_uppercase() {
+        let results = convert_query("100 CN to HK").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "CNY");
+        assert_eq!(results[0].target_code, "HKD");
+    }
+
+    #[test]
+    fn parse_currency_alias_uppercase() {
+        let results = convert_query("100 RMB to TW").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_code, "CNY");
+        assert_eq!(results[0].target_code, "TWD");
     }
 
     #[test]

@@ -53,6 +53,10 @@ pub const SEARCH_BAR_HEIGHT: f64 = 58.0;
 pub const SEPARATOR_HEIGHT: f64 = 1.0;
 /// Footer height: Row(28) + container padding([5,0]) = 38px
 pub const FOOTER_HEIGHT: f64 = 38.0;
+/// Height of the main-page empty search state ("No results" hint)
+pub const MAIN_EMPTY_STATE_HEIGHT: f64 = 84.0;
+/// Clipboard page content height (normal dual-pane mode)
+pub const CLIPBOARD_CONTENT_HEIGHT: f64 = 360.0;
 
 /// The Coco descriptor name to be put for all Coco commands
 pub const COCO_DESC_NAME: &str = "Utility";
@@ -65,6 +69,13 @@ pub enum Page {
     EmojiSearch,
     AgentList,
     WindowSwitcher,
+}
+
+/// Top-level launcher modes exposed in the search bar switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherMode {
+    App,
+    Clipboard,
 }
 
 /// The types of arrow keys
@@ -103,9 +114,13 @@ pub enum Message {
     ReloadConfig,
     SetSender(ExtSender),
     SwitchToPage(Page),
+    SwitchLauncherMode(LauncherMode),
+    CycleLauncherMode { reverse: bool },
     ClipboardHistory(ClipBoardContentType),
     ChangeFocus(ArrowKey),
-    ToggleAgentMode,
+    ResultPointerMoved(f32),
+    ResultPointerExited,
+    SpacePressed,
     AgentSessionSelected(String),
     NewAgentSession(String),
     AgentInput(String),
@@ -119,8 +134,12 @@ pub enum Message {
     ExecuteAction(crate::app::actions::Action),
     ActionFocusChanged(ArrowKey),
     // Clipboard actions
+    ClipboardOpenAt(u32),
+    ClipboardFinalizePaste,
+    ApplyCalculatorInput(String),
     ClipboardTogglePinFocused,
     ClipboardDeleteFocused,
+    HoverResult(u32),
     FocusWindow(i32, u32),
     // Native show/hide animation completions (macOS)
     NativeHideComplete,

@@ -16,6 +16,5 @@ pub const EXCLAMATION_TRIANGLE: char = '\u{F33B}'; // bi-exclamation-triangle
 pub const ARROW_RETURN_LEFT: char = '\u{F124}'; // bi-arrow-return-left (⏎ equivalent)
 pub const CIRCLE_FILL: char = '\u{F287}'; // bi-circle-fill
 pub const CLIPBOARD: char = '\u{F290}'; // bi-clipboard
-pub const IMAGE: char = '\u{F3EF}'; // bi-image
-pub const PIN_FILL: char = '\u{F48B}'; // bi-pin-fill
 pub const APP: char = '\u{F0BF}'; // bi-app (generic app placeholder)
+pub const APP_PACKAGE: char = '\u{F1C7}'; // bi-box-seam

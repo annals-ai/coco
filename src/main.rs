@@ -60,9 +60,6 @@ fn main() -> iced::Result {
         .register_all(&hotkeys)
         .expect("Unable to register hotkey");
 
-    // Install global monitor for double-tap Option key → Agent mode
-    platform::install_double_tap_option_monitor();
-
     iced::daemon(
         move || tile::elm::new(show_hide, &config),
         tile::update::handle_update,

@@ -20,6 +20,9 @@ haptic_feedback = true
 # Show the tray icon
 show_trayicon = true
 
+# Terminal app used by the "Open Terminal" item.
+# Examples: "Terminal", "Ghostty", "iTerm"
+terminal_app = "Terminal"
 
 [theme]
 
@@ -50,4 +53,3 @@ command = "echo "
 # icon_path is optional
 alias = "Variables 1" # the name that will be displayed in the results
 alias_lc = "var test" # the name used to search for it
-

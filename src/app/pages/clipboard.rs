@@ -1,29 +1,35 @@
-//! Raycast-style dual-pane clipboard history view.
+//! Clipboard history list view.
 
 use iced::widget::scrollable::Anchor;
 use iced::widget::{
-    Column, Row, Scrollable, Text, container,
+    Button, Column, Row, Scrollable, Text, container, mouse_area,
     scrollable::{Direction, Scrollbar},
     space,
 };
 use iced::{Alignment, Color, Element, Length};
+use std::path::{Path, PathBuf};
 
 use crate::app::{Message, WINDOW_WIDTH};
 use crate::clipboard::ClipBoardContentType;
 use crate::clipboard_store::{ClipboardEntry, format_relative_time};
 use crate::config::Theme;
 use crate::styles::{
-    clipboard_preview_style, footer_shortcut_badge_style, footer_style, result_row_container_style,
-    with_alpha,
+    clipboard_preview_style, footer_shortcut_badge_style, footer_style, result_button_style,
+    result_row_container_style, with_alpha,
 };
 
-/// Main dual-pane clipboard view.
+/// Main clipboard list view.
 pub fn clipboard_view(
     entries: &[ClipboardEntry],
     indices: &[usize],
     focus_id: u32,
     theme: &Theme,
 ) -> Element<'static, Message> {
+    const CLIPBOARD_ROW_H: f32 = 32.0;
+    const WINDOW_ROWS: usize = 48;
+    const LIST_TOP_GAP: f32 = 10.0;
+    let viewport_h = crate::app::CLIPBOARD_CONTENT_HEIGHT as f32;
+
     if indices.is_empty() {
         let msg = if entries.is_empty() {
             "No clipboard history"
@@ -44,14 +50,39 @@ pub fn clipboard_view(
 
     let left_width = (WINDOW_WIDTH * 0.40) as f32;
 
-    // ── Left pane: list ──────────────────────────────────────────
-    let mut list_col = Column::new().padding([2, 4]).spacing(0);
+    // ── Left list ────────────────────────────────────────────────
+    let mut list_col = Column::new()
+        .padding([2, 4])
+        .spacing(0)
+        .width(Length::Fill)
+        .push(space().height(LIST_TOP_GAP));
 
-    for (display_idx, &entry_idx) in indices.iter().enumerate() {
+    let total = indices.len();
+    let focus_idx = (focus_id as usize).min(total.saturating_sub(1));
+    let mut start = focus_idx.saturating_sub(WINDOW_ROWS / 2);
+    let end = (start + WINDOW_ROWS).min(total);
+    if end - start < WINDOW_ROWS {
+        start = end.saturating_sub(WINDOW_ROWS);
+    }
+
+    if start > 0 {
+        list_col = list_col.push(space().height(start as f32 * CLIPBOARD_ROW_H));
+    }
+
+    for (display_idx, &entry_idx) in indices
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
         if let Some(entry) = entries.get(entry_idx) {
             let focused = display_idx as u32 == focus_id;
-            list_col = list_col.push(clipboard_row(entry, focused, theme));
+            list_col = list_col.push(clipboard_row(entry, display_idx as u32, focused, theme));
         }
+    }
+
+    if end < total {
+        list_col = list_col.push(space().height((total - end) as f32 * CLIPBOARD_ROW_H));
     }
 
     let list_scrollable = Scrollable::with_direction(
@@ -64,11 +95,14 @@ pub fn clipboard_view(
         ),
     )
     .id("results")
-    .height(360);
+    .width(Length::Fill)
+    .height(viewport_h);
 
-    let left_pane = container(list_scrollable).width(left_width);
+    let left_pane = container(list_scrollable)
+        .width(left_width)
+        .height(viewport_h)
+        .clip(true);
 
-    // ── Vertical separator ───────────────────────────────────────
     let separator = container(space().width(1).height(Length::Fill))
         .style(move |_| iced::widget::container::Style {
             background: Some(iced::Background::Color(with_alpha(Color::WHITE, 0.06))),
@@ -77,106 +111,110 @@ pub fn clipboard_view(
         .height(Length::Fill)
         .width(1);
 
-    // ── Right pane: preview ──────────────────────────────────────
     let focused_entry = indices.get(focus_id as usize).and_then(|&i| entries.get(i));
-    let right_pane = clipboard_preview(focused_entry, theme);
+    let right_pane = clipboard_preview(focused_entry, theme, viewport_h);
 
-    let row = Row::new()
+    Row::new()
         .push(left_pane)
         .push(separator)
         .push(right_pane)
-        .height(360)
-        .width(Length::Fill);
-
-    container(row).height(360).into()
+        .height(viewport_h)
+        .width(Length::Fill)
+        .into()
 }
 
-/// A single row in the left pane (fixed 32px height, clipped).
-fn clipboard_row(
-    entry: &ClipboardEntry,
-    focused: bool,
-    theme: &Theme,
-) -> Element<'static, Message> {
-    let title_opacity = if focused { 1.0 } else { 0.85 };
-    let time_opacity = if focused { 0.45 } else { 0.30 };
+fn local_media_path(text: &str) -> Option<PathBuf> {
+    let raw = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    if raw.is_empty() {
+        return None;
+    }
 
-    // Pin indicator (fixed width for alignment)
-    let pin_el: Element<'static, Message> = if entry.pinned {
-        container(crate::icons::icon(
-            crate::icons::PIN_FILL,
-            9.0,
-            theme.text_color(0.55),
-        ))
-        .width(12)
-        .center_y(Length::Fill)
-        .into()
+    let dequoted = if let Some(rest) = raw.strip_prefix("file://") {
+        if let Some(localhost_path) = rest.strip_prefix("localhost/") {
+            format!("/{}", localhost_path)
+        } else {
+            rest.to_string()
+        }
     } else {
-        space().width(12).into()
+        raw.to_string()
     };
-
-    // Type icon (fixed width)
-    let type_icon = match &entry.content {
-        ClipBoardContentType::Text(_) => crate::icons::CLIPBOARD,
-        ClipBoardContentType::Image(_) => crate::icons::IMAGE,
-    };
-    let type_el = container(crate::icons::icon(type_icon, 10.0, theme.text_color(0.30)))
-        .width(14)
-        .center_y(Length::Fill);
-
-    // Title — single line, hard-clipped by outer container
-    let title = Text::new(entry.preview_title.clone())
-        .size(12)
-        .color(theme.text_color(title_opacity))
-        .font(theme.font())
-        .wrapping(iced::widget::text::Wrapping::None);
-
-    // Relative time (fixed width so it doesn't get pushed out)
-    let time_str = format_relative_time(&entry.created_at);
-    let time_text = Text::new(time_str)
-        .size(10)
-        .color(theme.text_color(time_opacity))
-        .font(theme.font())
-        .wrapping(iced::widget::text::Wrapping::None);
-
-    let row = Row::new()
-        .push(pin_el)
-        .push(type_el)
-        .push(container(title).width(Length::Fill).clip(true))
-        .push(time_text)
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(32);
-
-    let theme_for_cont = theme.clone();
-    container(row)
-        .padding([0, 6])
-        .width(Length::Fill)
-        .height(32)
-        .clip(true)
-        .style(move |_| result_row_container_style(&theme_for_cont, focused))
-        .into()
+    let dequoted = dequoted.trim_matches('"');
+    let path = Path::new(dequoted);
+    if path.exists() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
 }
 
-/// Right pane preview.
-fn clipboard_preview(entry: Option<&ClipboardEntry>, theme: &Theme) -> Element<'static, Message> {
+fn media_kind(path: &Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())?;
+    match ext.as_str() {
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "flv" => Some("Video"),
+        "mp3" | "m4a" | "wav" | "aac" | "flac" | "ogg" => Some("Audio"),
+        _ => None,
+    }
+}
+
+fn clipboard_preview(
+    entry: Option<&ClipboardEntry>,
+    theme: &Theme,
+    height: f32,
+) -> Element<'static, Message> {
     let theme_for_style = theme.clone();
+    let panel = |content: Element<'static, Message>| -> Element<'static, Message> {
+        container(content)
+            .width(Length::Fill)
+            .height(height)
+            .style(move |_| clipboard_preview_style(&theme_for_style))
+            .into()
+    };
 
     match entry {
-        None => container(
-            Text::new("Select an item to preview")
-                .size(13)
-                .color(theme.text_color(0.25))
-                .font(theme.font()),
-        )
-        .width(Length::Fill)
-        .height(360)
-        .center(Length::Fill)
-        .style(move |_| clipboard_preview_style(&theme_for_style))
-        .into(),
-
+        None => panel(
+            container(
+                Text::new("Select an item to preview")
+                    .size(13)
+                    .color(theme.text_color(0.25))
+                    .font(theme.font()),
+            )
+            .width(Length::Fill)
+            .height(height)
+            .center(Length::Fill)
+            .into(),
+        ),
         Some(entry) => match &entry.content {
             ClipBoardContentType::Text(text) => {
+                if let Some(path) = local_media_path(text)
+                    && let Some(kind) = media_kind(&path)
+                {
+                    let body = Column::new()
+                        .push(
+                            Text::new(format!("{kind} File"))
+                                .size(15)
+                                .color(theme.text_color(0.85))
+                                .font(theme.font()),
+                        )
+                        .push(
+                            Text::new(path.to_string_lossy().to_string())
+                                .size(12)
+                                .color(theme.text_color(0.60))
+                                .font(theme.font()),
+                        )
+                        .push(
+                            Text::new("Press SPACE for native preview playback")
+                                .size(11)
+                                .color(theme.text_color(0.45))
+                                .font(theme.font()),
+                        )
+                        .spacing(10)
+                        .padding(16);
+                    return panel(container(body).width(Length::Fill).into());
+                }
+
                 let preview_text = if text.len() > 5000 {
                     text.chars().take(5000).collect::<String>() + "..."
                 } else {
@@ -198,13 +236,9 @@ fn clipboard_preview(entry: Option<&ClipboardEntry>, theme: &Theme) -> Element<'
                             .anchor(Anchor::Start),
                     ),
                 )
-                .height(360);
+                .height(height);
 
-                container(scrollable)
-                    .width(Length::Fill)
-                    .height(360)
-                    .style(move |_| clipboard_preview_style(&theme_for_style))
-                    .into()
+                panel(scrollable.into())
             }
             ClipBoardContentType::Image(img) => {
                 let handle = iced::widget::image::Handle::from_rgba(
@@ -217,16 +251,72 @@ fn clipboard_preview(entry: Option<&ClipboardEntry>, theme: &Theme) -> Element<'
                     .width(Length::Fill)
                     .height(Length::Fill);
 
-                container(image_widget)
-                    .width(Length::Fill)
-                    .height(360)
-                    .padding(16)
-                    .center(Length::Fill)
-                    .style(move |_| clipboard_preview_style(&theme_for_style))
-                    .into()
+                panel(
+                    container(image_widget)
+                        .width(Length::Fill)
+                        .height(height)
+                        .padding(16)
+                        .center(Length::Fill)
+                        .into(),
+                )
             }
         },
     }
+}
+
+/// A single row in the left pane (fixed 32px height, clipped).
+fn clipboard_row(
+    entry: &ClipboardEntry,
+    display_idx: u32,
+    focused: bool,
+    theme: &Theme,
+) -> Element<'static, Message> {
+    let title_opacity = if focused { 1.0 } else { 0.85 };
+    let time_opacity = if focused { 0.45 } else { 0.30 };
+
+    // Title — single line, hard-clipped by outer container
+    let title = Text::new(entry.preview_title.clone())
+        .size(12)
+        .color(theme.text_color(title_opacity))
+        .font(theme.font())
+        .wrapping(iced::widget::text::Wrapping::None);
+
+    // Relative time (fixed width so it doesn't get pushed out)
+    let time_str = format_relative_time(&entry.created_at);
+    let time_text = Text::new(time_str)
+        .size(10)
+        .color(theme.text_color(time_opacity))
+        .font(theme.font())
+        .wrapping(iced::widget::text::Wrapping::None);
+
+    let row = Row::new()
+        .push(container(title).width(Length::Fill).clip(true))
+        .push(space().width(8))
+        .push(time_text)
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .height(32);
+
+    let theme_for_btn = theme.clone();
+    let content = Button::new(row)
+        .on_press(Message::ClipboardOpenAt(display_idx))
+        .style(move |_, status| result_button_style(&theme_for_btn, focused, status))
+        .width(Length::Fill)
+        .height(32)
+        .padding(0);
+
+    let theme_for_cont = theme.clone();
+    let row_container = container(content)
+        .padding([0, 4])
+        .width(Length::Fill)
+        .height(32)
+        .clip(true)
+        .style(move |_| result_row_container_style(&theme_for_cont, focused));
+
+    mouse_area(row_container)
+        .on_enter(Message::HoverResult(display_idx))
+        .into()
 }
 
 /// Clipboard-specific footer with shortcuts.
@@ -248,15 +338,11 @@ pub fn clipboard_footer(theme: &Theme, count: usize) -> Element<'static, Message
 
     let theme_clone = theme.clone();
 
-    let copy_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Copy", theme);
-    let pin_badge = shortcut_badge("\u{2318}P", "Pin", theme);
-    let del_badge = shortcut_badge("\u{2318}D", "Delete", theme);
+    let paste_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Paste", theme);
     let esc_badge = shortcut_badge("ESC", "Back", theme);
 
     let right = Row::new()
-        .push(copy_badge)
-        .push(pin_badge)
-        .push(del_badge)
+        .push(paste_badge)
         .push(esc_badge)
         .spacing(8)
         .align_y(Alignment::Center);

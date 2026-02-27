@@ -7,7 +7,7 @@ use global_hotkey::hotkey::HotKey;
 use iced::font::Weight;
 use iced::widget::scrollable::{Anchor, Direction, Scrollbar};
 use iced::widget::text::LineHeight;
-use iced::widget::{Button, Column, Row, Scrollable, Text, container, markdown, space};
+use iced::widget::{Button, Column, Row, Scrollable, Text, container, markdown, mouse_area, space};
 use iced::{Alignment, window};
 use iced::{Element, Task};
 use iced::{Length::Fill, widget::text_input};
@@ -22,12 +22,13 @@ use crate::config::Theme;
 use crate::platform;
 use crate::styles::{
     agent_content_style, agent_input_bar_style, agent_title_bar_style, coco_text_input_style,
-    contents_style, footer_shortcut_badge_style, footer_style, permission_banner_button_style,
-    permission_banner_style, separator_style, user_bubble_style,
+    contents_style, footer_shortcut_badge_style, footer_style, mode_switch_button_style,
+    mode_switch_container_style, permission_banner_button_style, permission_banner_style,
+    separator_style, user_bubble_style,
 };
 use crate::{app::pages::clipboard::clipboard_view, platform::get_installed_apps};
 use crate::{
-    app::{Message, Page, apps::App, default_settings, tile::Tile},
+    app::{LauncherMode, Message, Page, apps::App, default_settings, tile::Tile},
     config::Config,
     platform::transform_process_to_ui_element,
 };
@@ -61,6 +62,10 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
     options.extend(App::basic_apps());
     options.par_sort_by_key(|x| x.name.len());
     let options = AppIndex::from_apps(options);
+    let clipboard_store = crate::clipboard_store::ClipboardStore::load();
+    let clipboard_filtered = (0..clipboard_store.len()).collect();
+    let agent_sessions = crate::agent::session::list_sessions();
+    let agent_filtered = (0..agent_sessions.len()).collect();
 
     (
         Tile {
@@ -80,13 +85,15 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             focused: false,
             config: config.clone(),
             theme: config.theme.to_owned().into(),
-            clipboard_store: crate::clipboard_store::ClipboardStore::load(),
-            clipboard_filtered: Vec::new(),
+            clipboard_store,
+            clipboard_filtered,
+            clipboard_quick_preview_open: false,
             tray_icon: None,
             sender: None,
             page: Page::Main,
             fuzzy_matcher: RefCell::new(Matcher::new(MatcherConfig::DEFAULT)),
-            agent_sessions: Vec::new(),
+            agent_sessions,
+            agent_filtered,
             agent_window_id: None,
             agent_session_id: None,
             agent_messages: Vec::new(),
@@ -95,6 +102,7 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             agent_markdown: iced::widget::markdown::Content::new(),
             missing_accessibility: true, // will be checked properly on OpenWindow
             missing_input_monitoring: true,
+            missing_paste_permission: false,
             permissions_ok: false,
             zero_query_cache: Vec::new(),
             show_actions: false,
@@ -111,6 +119,9 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             hide_animating: false,
             last_hotkey_time: None,
             last_query_edit_time: None,
+            suppress_row_hover_focus: false,
+            pending_paste_after_hide: false,
+            calculator_history: Vec::new(),
         },
         Task::batch([open.map(move |_| Message::OpenWindow(Some(id)))]),
     )
@@ -127,10 +138,15 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         return space().into();
     }
 
+    let show_main_empty_state =
+        tile.page == Page::Main && !tile.query.is_empty() && tile.results.is_empty();
+    let current_launcher_mode = launcher_mode_for_page(&tile.page);
+
     let round_bottom_edges = match &tile.page {
-        Page::Main | Page::EmojiSearch => tile.results.is_empty(),
+        Page::Main => tile.results.is_empty() && !show_main_empty_state,
+        Page::EmojiSearch => tile.results.is_empty(),
         Page::ClipboardHistory => tile.clipboard_display_count() == 0,
-        Page::AgentList => tile.agent_sessions.is_empty(),
+        Page::AgentList => false,
         Page::WindowSwitcher => tile.window_list.is_empty(),
     };
     let theme = &tile.config.theme;
@@ -158,18 +174,22 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         .style(move |_, _| coco_text_input_style(theme, round_bottom_edges))
         .padding([0, 0]);
 
-    let search_bar = container(
-        Row::new()
-            .push(search_icon)
-            .push(title_input)
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .width(Fill)
-            .height(42),
-    )
-    .padding([8, 18])
-    .width(Fill)
-    .height(crate::app::SEARCH_BAR_HEIGHT as u32);
+    let mut search_row = Row::new()
+        .push(search_icon)
+        .push(title_input)
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .width(Fill)
+        .height(42);
+
+    if let Some(mode) = current_launcher_mode {
+        search_row = search_row.push(mode_switch(mode, theme));
+    }
+
+    let search_bar = container(search_row)
+        .padding([8, 18])
+        .width(Fill)
+        .height(crate::app::SEARCH_BAR_HEIGHT as u32);
 
     // ── Scrollbar direction ───────────────────────────────────────────
     let scrollbar_direction = if theme.show_scroll_bar {
@@ -194,11 +214,14 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     } else if tile.page == Page::AgentList {
         crate::app::pages::agent::agent_list_view(
             &tile.agent_sessions,
+            tile.agent_display_indices(),
             tile.focus_id,
             theme.clone(),
         )
     } else if tile.page == Page::WindowSwitcher {
         window_switcher_view(&tile.window_list, tile.focus_id, theme)
+    } else if show_main_empty_state {
+        main_empty_search_state_view(theme)
     } else if tile.results.is_empty() {
         space().into()
     } else if tile.page == Page::EmojiSearch {
@@ -207,26 +230,14 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         // Zero-query state: render with group headers
         zero_query_results_view(&tile.results, tile.focus_id, theme)
     } else {
-        container(
-            Column::from_iter(
-                tile.results
-                    .iter()
-                    .enumerate()
-                    .map(|(i, app)| app.clone().render(theme.clone(), i as u32, tile.focus_id)),
-            )
-            .padding([
-                crate::app::RESULT_LIST_PADDING_Y,
-                crate::app::RESULT_LIST_PADDING_X,
-            ]),
-        )
-        .into()
+        search_results_view(&tile.results, tile.focus_id, theme)
     };
 
     let results_count = match &tile.page {
         Page::Main => tile.results.len(),
         Page::ClipboardHistory => tile.clipboard_display_count(),
         Page::EmojiSearch => tile.results.len(),
-        Page::AgentList => 1 + tile.agent_sessions.len(),
+        Page::AgentList => tile.agent_display_count(),
         Page::WindowSwitcher => tile.window_list.len(),
     };
 
@@ -237,9 +248,11 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         Page::WindowSwitcher => !tile.window_list.is_empty(),
     };
 
+    let has_body_content = has_results || show_main_empty_state;
+
     let height = match tile.page {
-        Page::ClipboardHistory => 360,
-        Page::AgentList => std::cmp::min((1 + tile.agent_sessions.len()) * 52, 364),
+        Page::ClipboardHistory => crate::app::CLIPBOARD_CONTENT_HEIGHT as usize,
+        Page::AgentList => std::cmp::min(tile.agent_display_count() * 52, 364),
         Page::WindowSwitcher => std::cmp::min(tile.window_list.len() * 52, 364),
         _ => {
             // For zero-query state, account for section headers
@@ -247,6 +260,11 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
                 tile.query.is_empty() && tile.results.iter().any(|a| a.category.is_some());
             if is_zero_query {
                 let h = crate::app::tile::update::zero_query_scrollable_height(&tile.results);
+                h.min(crate::app::MAX_RESULTS_SCROLL_HEIGHT) as usize
+            } else if show_main_empty_state {
+                crate::app::MAIN_EMPTY_STATE_HEIGHT as usize
+            } else if tile.page == Page::Main && !tile.query.is_empty() {
+                let h = crate::app::tile::update::search_results_scrollable_height(&tile.results);
                 h.min(crate::app::MAX_RESULTS_SCROLL_HEIGHT) as usize
             } else {
                 let max_h = crate::app::MAX_RESULTS_SCROLL_HEIGHT as usize;
@@ -258,10 +276,14 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let scrollable = Scrollable::with_direction(results, scrollbar_direction)
         .id("results")
         .height(height as u32);
+    let scrollable: Element<'_, Message> = mouse_area(scrollable)
+        .on_move(|position| Message::ResultPointerMoved(position.x))
+        .on_exit(Message::ResultPointerExited)
+        .into();
 
     // ── Separator ─────────────────────────────────────────────────────
     let theme_for_sep = theme.clone();
-    let separator: Element<'_, Message> = if has_results {
+    let separator: Element<'_, Message> = if has_body_content {
         container(space().height(1).width(Fill))
             .padding([0, 18])
             .width(Fill)
@@ -324,6 +346,59 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
             background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
             ..Default::default()
         })
+        .into()
+}
+
+fn launcher_mode_for_page(page: &Page) -> Option<LauncherMode> {
+    match page {
+        Page::Main => Some(LauncherMode::App),
+        Page::ClipboardHistory => Some(LauncherMode::Clipboard),
+        Page::AgentList => None,
+        _ => None,
+    }
+}
+
+fn mode_switch<'a>(active: LauncherMode, theme: &Theme) -> Element<'a, Message> {
+    let row = Row::new()
+        .push(mode_switch_segment(LauncherMode::App, active, theme))
+        .push(mode_switch_segment(LauncherMode::Clipboard, active, theme))
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let theme_for_container = theme.clone();
+    container(row)
+        .padding([2, 2])
+        .style(move |_| mode_switch_container_style(&theme_for_container))
+        .into()
+}
+
+fn mode_switch_segment<'a>(
+    mode: LauncherMode,
+    active: LauncherMode,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    let is_active = mode == active;
+    let icon_color = if is_active {
+        theme.accent_color()
+    } else {
+        theme.text_color(0.45)
+    };
+    let icon_char = match mode {
+        LauncherMode::App => crate::icons::APP_PACKAGE,
+        LauncherMode::Clipboard => crate::icons::CLIPBOARD,
+    };
+    let icon_size = 15.0;
+    let icon = container(crate::icons::icon(icon_char, icon_size, icon_color))
+        .center(Fill)
+        .width(Fill)
+        .height(Fill);
+    let theme_for_btn = theme.clone();
+    Button::new(icon)
+        .on_press(Message::SwitchLauncherMode(mode))
+        .style(move |_, _| mode_switch_button_style(&theme_for_btn, is_active))
+        .padding([0, 0])
+        .width(24)
+        .height(24)
         .into()
 }
 
@@ -412,6 +487,44 @@ fn permission_banners<'a>(tile: &Tile, theme: &crate::config::Theme) -> Element<
         );
     }
 
+    if tile.missing_paste_permission {
+        let theme_for_banner = theme.clone();
+        let theme_for_btn = theme.clone();
+        let row = Row::new()
+            .push(
+                Row::new()
+                    .push(crate::icons::icon(
+                        crate::icons::EXCLAMATION_TRIANGLE,
+                        12.0,
+                        theme.text_color(0.75),
+                    ))
+                    .push(
+                        Text::new(" 自动粘贴失败，请在系统设置中开启 Coco 的键盘控制权限")
+                            .size(12)
+                            .color(theme.text_color(0.75))
+                            .font(theme.font()),
+                    )
+                    .align_y(Alignment::Center),
+            )
+            .push(space().width(Fill))
+            .push(
+                Button::new(Text::new("前往设置 →").size(12).font(theme.font()))
+                    .on_press(Message::OpenAccessibilitySettings)
+                    .padding([2, 8])
+                    .style(move |_, _| permission_banner_button_style(&theme_for_btn)),
+            )
+            .align_y(Alignment::Center)
+            .width(Fill)
+            .height(28);
+
+        col = col.push(
+            container(row)
+                .width(Fill)
+                .padding([2, 8])
+                .style(move |_| permission_banner_style(&theme_for_banner)),
+        );
+    }
+
     col.into()
 }
 
@@ -436,11 +549,11 @@ fn footer(theme: Theme, results_count: usize) -> Element<'static, Message> {
     let theme_clone = theme.clone();
 
     let open_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Open", &theme);
-    let actions_badge = shortcut_badge("\u{2318}K", "Actions", &theme);
+    let esc_badge = shortcut_badge("ESC", "Back", &theme);
 
     let right = Row::new()
         .push(open_badge)
-        .push(actions_badge)
+        .push(esc_badge)
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -658,7 +771,9 @@ fn window_switcher_view<'a>(
 
         let btn = Button::new(row)
             .on_press(Message::FocusWindow(pid, wid))
-            .style(move |_, _| crate::styles::result_button_style(&theme_for_btn))
+            .style(move |_, status| {
+                crate::styles::result_button_style(&theme_for_btn, focused, status)
+            })
             .width(Fill)
             .padding(0)
             .height(44);
@@ -766,7 +881,9 @@ fn actions_overlay_view<'a>(
         let action_clone = item.action.clone();
         let btn = Button::new(row)
             .on_press(Message::ExecuteAction(action_clone))
-            .style(move |_, _| crate::styles::result_button_style(&theme_for_row))
+            .style(move |_, status| {
+                crate::styles::result_button_style(&theme_for_row, focused, status)
+            })
             .width(Fill)
             .padding(0)
             .height(32);
@@ -877,6 +994,106 @@ fn zero_query_results_view<'a>(
             app.clone()
                 .render_with_status(theme.clone(), i as u32, focus_id),
         );
+    }
+
+    container(col).into()
+}
+
+fn main_empty_search_state_view<'a>(theme: &Theme) -> Element<'a, Message> {
+    let title = Text::new("No results")
+        .size(13)
+        .color(theme.text_color(0.55))
+        .font(theme.font());
+
+    let subtitle = Text::new("Try a different keyword")
+        .size(11)
+        .color(theme.text_color(0.30))
+        .font(theme.font());
+
+    container(
+        Column::new()
+            .push(title)
+            .push(subtitle)
+            .spacing(4)
+            .align_x(Alignment::Center),
+    )
+    .width(Fill)
+    .height(crate::app::MAIN_EMPTY_STATE_HEIGHT as u32)
+    .center(Fill)
+    .into()
+}
+
+fn search_results_view<'a>(
+    results: &[crate::app::apps::App],
+    focus_id: u32,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    use crate::styles::section_header_style;
+
+    let is_calculator_section = !results.is_empty()
+        && results
+            .iter()
+            .all(|app| {
+                app.name_lc.starts_with("__calc__|")
+                    || app.name_lc.starts_with("__calc_history__|")
+            });
+    let is_currency_section = !results.is_empty()
+        && results
+            .iter()
+            .all(|app| app.name_lc.starts_with("__currency__|"));
+
+    let mut col = Column::new().padding([
+        crate::app::RESULT_LIST_PADDING_Y,
+        crate::app::RESULT_LIST_PADDING_X,
+    ]);
+
+    if !is_calculator_section {
+        let header_label = if is_currency_section {
+            "CURRENCY"
+        } else {
+            "APPS"
+        };
+        let header_row = {
+            let mut row = Row::new().align_y(Alignment::Center).width(Fill).push(
+                Text::new(header_label)
+                    .size(10)
+                    .color(theme.text_color(0.24))
+                    .font(theme.font()),
+            );
+
+            if is_currency_section {
+                let updated = crate::currency_conversion::last_updated_label();
+                let theme_for_badge = theme.clone();
+                row = row.push(space::horizontal()).push(
+                    container(
+                        Text::new(format!("更新 {updated}"))
+                            .size(9)
+                            .color(theme.text_color(0.34))
+                            .font(theme.font()),
+                    )
+                    .padding([1, 6])
+                    .style(move |_| footer_shortcut_badge_style(&theme_for_badge)),
+                );
+            }
+
+            row
+        };
+
+        let theme_for_header = theme.clone();
+        let header: Element<'a, Message> = container(header_row)
+            .padding([
+                crate::app::ZQ_HEADER_PADDING_Y,
+                crate::app::ZQ_HEADER_PADDING_X,
+            ])
+            .width(Fill)
+            .height(crate::app::ZQ_HEADER_HEIGHT as f32)
+            .style(move |_| section_header_style(&theme_for_header))
+            .into();
+        col = col.push(header);
+    }
+
+    for (i, app) in results.iter().enumerate() {
+        col = col.push(app.clone().render(theme.clone(), i as u32, focus_id));
     }
 
     container(col).into()

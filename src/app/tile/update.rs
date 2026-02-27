@@ -30,7 +30,7 @@ use crate::app::apps::App;
 use crate::app::apps::AppCommand;
 use crate::app::menubar::menu_icon;
 use crate::app::{
-    Message, Page, agent_window_settings,
+    LauncherMode, Message, Page, agent_window_settings,
     tile::{AppIndex, Tile},
 };
 use crate::app::{ROW_HEIGHT, WINDOW_WIDTH};
@@ -59,6 +59,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             if let Some(wid) = opt_id {
                 tile.main_window_id = Some(wid);
             }
+            close_clipboard_preview(tile);
             tile.capture_frontmost();
             focus_this_app();
             tile.focused = true;
@@ -67,15 +68,20 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.show_animating = true;
             tile.pending_window_height = None;
             tile.window_resize_token = tile.window_resize_token.wrapping_add(1);
-            // NOTE: On macOS 26 (Tahoe), the AXIsProcessTrusted() and
-            // CGPreflightListenEventAccess() APIs return false even when
-            // the user has granted permissions in System Settings. This is
-            // a known issue with the new OS. We skip the permission banner
-            // entirely to avoid confusing users.
-            // TODO: Re-enable when Apple fixes these APIs on macOS 26+.
-            tile.permissions_ok = true;
-            tile.missing_accessibility = false;
+            // Read real AX trusted state so permission UI matches paste behavior.
+            tile.missing_accessibility = !platform::accessibility_permission_granted();
             tile.missing_input_monitoring = false;
+            tile.missing_paste_permission = platform::paste_permission_warning_active();
+            tile.permissions_ok = !(tile.missing_accessibility
+                || tile.missing_input_monitoring
+                || tile.missing_paste_permission);
+            coco_log!(
+                "OpenWindow permission state: missing_acc={} missing_input={} missing_paste={} permissions_ok={}",
+                tile.missing_accessibility,
+                tile.missing_input_monitoring,
+                tile.missing_paste_permission,
+                tile.permissions_ok
+            );
             // Always refresh zero-query cache on open
             let zq = build_zero_query_results_inner(&tile.options, tile.config.theme.show_icons);
             tile.zero_query_cache = zq;
@@ -84,7 +90,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             let target_h = if tile.page == Page::ClipboardHistory && tile.clipboard_store.len() > 0
             {
                 tile.clipboard_rebuild_filtered();
-                blur_height(banner_h, 360.0)
+                blur_height(banner_h, clipboard_content_height(tile))
+            } else if tile.page == Page::AgentList {
+                tile.agent_refresh_sessions();
+                blur_height(
+                    banner_h,
+                    agent_list_content_height(tile.agent_display_count()),
+                )
             } else if tile.page == Page::Main && tile.query_lc.is_empty() {
                 // Zero-query state
                 tile.results = tile.zero_query_cache.clone();
@@ -100,10 +112,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 // Restore previous search results
                 tile.handle_search_query_changed();
                 if !tile.results.is_empty() {
-                    let rows = std::cmp::min(tile.results.len(), 7) as f64;
-                    blur_height(banner_h, rows * ROW_HEIGHT)
+                    let content_h = search_results_scrollable_height(&tile.results)
+                        .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT);
+                    blur_height(banner_h, content_h)
                 } else {
-                    blur_height(banner_h, 0.0)
+                    blur_height(banner_h, crate::app::MAIN_EMPTY_STATE_HEIGHT)
                 }
             } else {
                 blur_height(banner_h, 0.0)
@@ -152,6 +165,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
+            if tile.page == Page::ClipboardHistory && tile.clipboard_quick_preview_open {
+                close_clipboard_preview(tile);
+                return Task::none();
+            }
+
             if tile.page == Page::EmojiSearch && !tile.query_lc.is_empty() {
                 return Task::none();
             }
@@ -165,7 +183,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     tile.clipboard_rebuild_filtered();
                     let banner_h = permission_banner_height(tile);
                     let content_h = if tile.clipboard_display_count() > 0 {
-                        360.0
+                        clipboard_content_height(tile)
                     } else {
                         0.0
                     };
@@ -229,6 +247,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         Message::ClearSearchQuery => {
             tile.query_lc = String::new();
             tile.query = String::new();
+            close_clipboard_preview(tile);
             tile.last_query_edit_time = None;
             Task::none()
         }
@@ -238,11 +257,12 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             if tile.show_actions {
                 return Task::done(Message::ActionFocusChanged(key));
             }
+            tile.suppress_row_hover_focus = true;
 
             let len = match tile.page {
                 Page::ClipboardHistory => tile.clipboard_display_count() as u32,
                 Page::EmojiSearch => tile.results.len() as u32,
-                Page::AgentList => (1 + tile.agent_sessions.len()) as u32,
+                Page::AgentList => tile.agent_display_count() as u32,
                 Page::WindowSwitcher => tile.window_list.len() as u32,
                 _ => tile.results.len() as u32,
             };
@@ -297,7 +317,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 }
                 Page::ClipboardHistory => {
                     let row_h = 32.0_f32;
-                    let viewport_h = 360.0_f32;
+                    let viewport_h = clipboard_content_height(tile) as f32;
                     let total_h = len as f32 * row_h;
                     scroll_offset_with_mid_threshold(
                         tile.focus_id,
@@ -309,7 +329,21 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                         wrapped_down,
                     )
                 }
-                Page::Main | Page::AgentList | Page::WindowSwitcher => {
+                Page::AgentList | Page::WindowSwitcher => {
+                    let row_h = 52.0_f32;
+                    let total_h = len as f32 * row_h;
+                    let viewport_h = total_h.min(364.0);
+                    scroll_offset_with_mid_threshold_from_focus_y(
+                        tile.focus_id as f32 * row_h,
+                        len,
+                        row_h,
+                        viewport_h,
+                        total_h,
+                        wrapped_up,
+                        wrapped_down,
+                    )
+                }
+                Page::Main => {
                     let row_h = ROW_HEIGHT as f32;
                     let (focus_y, total_h, viewport_h) = if tile.page == Page::Main
                         && tile.query_lc.is_empty()
@@ -321,6 +355,15 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                             zero_query_scrollable_height(&tile.results)
                                 .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
                                 as f32,
+                        )
+                    } else if tile.page == Page::Main && !tile.query_lc.is_empty() {
+                        let total_h = search_results_scrollable_height(&tile.results) as f32;
+                        let viewport_h = total_h.min(crate::app::MAX_RESULTS_SCROLL_HEIGHT as f32);
+                        (
+                            search_results_focus_offset(&tile.results, tile.focus_id as usize)
+                                as f32,
+                            total_h,
+                            viewport_h,
                         )
                     } else {
                         let total_h = len as f32 * row_h;
@@ -340,6 +383,14 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 }
             };
 
+            if tile.page == Page::ClipboardHistory && tile.clipboard_quick_preview_open {
+                if let Some(content) = focused_clipboard_content(tile) {
+                    platform::update_clipboard_preview_panel(content);
+                } else {
+                    close_clipboard_preview(tile);
+                }
+            }
+
             Task::batch([
                 task,
                 operation::scroll_to(
@@ -352,6 +403,87 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             ])
         }
 
+        Message::ResultPointerMoved(x) => {
+            if tile.page == Page::ClipboardHistory {
+                let list_boundary_x = crate::app::WINDOW_WIDTH * 0.40;
+                tile.suppress_row_hover_focus = x > list_boundary_x;
+            } else {
+                tile.suppress_row_hover_focus = false;
+            }
+            Task::none()
+        }
+
+        Message::ResultPointerExited => {
+            tile.suppress_row_hover_focus = false;
+            Task::none()
+        }
+
+        Message::HoverResult(id) => {
+            if tile.suppress_row_hover_focus {
+                return Task::none();
+            }
+
+            let len = match tile.page {
+                Page::ClipboardHistory => tile.clipboard_display_count() as u32,
+                Page::AgentList => tile.agent_display_count() as u32,
+                Page::WindowSwitcher => tile.window_list.len() as u32,
+                _ => tile.results.len() as u32,
+            };
+
+            if id >= len || tile.focus_id == id {
+                return Task::none();
+            }
+
+            tile.focus_id = id;
+
+            if tile.page == Page::ClipboardHistory && tile.clipboard_quick_preview_open {
+                if let Some(content) = focused_clipboard_content(tile) {
+                    platform::update_clipboard_preview_panel(content);
+                } else {
+                    close_clipboard_preview(tile);
+                }
+            }
+
+            Task::none()
+        }
+
+        Message::ClipboardOpenAt(display_idx) => open_clipboard_entry(tile, display_idx),
+
+        Message::ClipboardFinalizePaste => {
+            coco_log!("ClipboardFinalizePaste: restore frontmost + paste");
+            let target_pid = tile.restore_frontmost();
+            platform::paste_to_frontmost(target_pid);
+            Task::none()
+        }
+
+        Message::ApplyCalculatorInput(input) => {
+            tile.page = Page::Main;
+            tile.query = input;
+            tile.query_lc = tile.query.to_lowercase();
+            tile.focus_id = 0;
+            tile.last_query_edit_time = if tile.query_lc.is_empty() {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
+            tile.suppress_row_hover_focus = true;
+            close_clipboard_preview(tile);
+
+            rebuild_results_for_current_query(tile);
+            let has_results_now = !tile.results.is_empty();
+            let banner_h = permission_banner_height(tile);
+            let scrollable_h = if !tile.query_lc.is_empty() && !has_results_now {
+                crate::app::MAIN_EMPTY_STATE_HEIGHT
+            } else if has_results_now {
+                search_results_scrollable_height(&tile.results)
+                    .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
+            } else {
+                0.0
+            };
+            let resize = tile.snap_resize(blur_height(banner_h, scrollable_h));
+            Task::batch([resize, operation::focus("query")])
+        }
+
         Message::OpenFocused => {
             // Execute focused action if overlay is open
             if tile.show_actions {
@@ -362,49 +494,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             }
 
             if tile.page == Page::ClipboardHistory {
-                let indices = tile.clipboard_display_indices();
-                eprintln!(
-                    "[clipboard] OpenFocused: focus_id={}, indices.len={}, store.len={}",
-                    tile.focus_id,
-                    indices.len(),
-                    tile.clipboard_store.len()
-                );
-                if let Some(&entry_idx) = indices.get(tile.focus_id as usize) {
-                    eprintln!("[clipboard] entry_idx={}", entry_idx);
-                    if let Some(entry) = tile.clipboard_store.get(entry_idx) {
-                        eprintln!("[clipboard] copying: {:?}", entry.preview_title);
-                        // Copy content to system clipboard
-                        match &entry.content {
-                            ClipBoardContentType::Text(text) => {
-                                arboard::Clipboard::new()
-                                    .unwrap()
-                                    .set_text(text.clone())
-                                    .ok();
-                            }
-                            ClipBoardContentType::Image(img) => {
-                                arboard::Clipboard::new()
-                                    .unwrap()
-                                    .set_image(img.to_owned_img())
-                                    .ok();
-                            }
-                        }
-                        // Hide window and return focus
-                        let hide = if let Some(wid) = tile.main_window_id {
-                            Task::done(Message::HideWindow(wid))
-                        } else {
-                            Task::none()
-                        };
-                        return Task::batch([hide, Task::done(Message::ReturnFocus)]);
-                    } else {
-                        eprintln!("[clipboard] entry not found at idx {}", entry_idx);
-                    }
-                } else {
-                    eprintln!(
-                        "[clipboard] focus_id {} out of range for indices",
-                        tile.focus_id
-                    );
-                }
-                return Task::none();
+                return open_clipboard_entry(tile, tile.focus_id);
             }
 
             if tile.page == Page::WindowSwitcher {
@@ -424,8 +514,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     };
                     return Task::done(Message::NewAgentSession(prompt));
                 } else {
-                    let idx = tile.focus_id as usize - 1;
-                    if let Some(session) = tile.agent_sessions.get(idx) {
+                    let filtered_idx = tile.focus_id as usize - 1;
+                    if let Some(&session_idx) = tile.agent_display_indices().get(filtered_idx)
+                        && let Some(session) = tile.agent_sessions.get(session_idx)
+                    {
                         return Task::done(Message::AgentSessionSelected(
                             session.session_id.clone(),
                         ));
@@ -448,6 +540,75 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 }) => Task::done(Message::ReturnFocus),
                 None => Task::none(),
             }
+        }
+
+        Message::SpacePressed => {
+            coco_log!(
+                "SpacePressed: page={:?} show_actions={} q='{}' qlen={} focus_id={}",
+                tile.page,
+                tile.show_actions,
+                tile.query,
+                tile.query.chars().count(),
+                tile.focus_id
+            );
+            if !tile.show_actions && tile.page == Page::ClipboardHistory {
+                if tile.clipboard_quick_preview_open {
+                    close_clipboard_preview(tile);
+                    coco_log!("SpacePressed clipboard: hide native preview panel");
+                    return Task::none();
+                }
+
+                if let Some(content) = focused_clipboard_content(tile).cloned() {
+                    tile.clipboard_quick_preview_open = true;
+                    platform::show_clipboard_preview_panel(&content);
+                    coco_log!("SpacePressed clipboard: show native preview panel");
+                } else {
+                    close_clipboard_preview(tile);
+                    coco_log!("SpacePressed clipboard: no focused entry");
+                }
+                return Task::none();
+            }
+
+            coco_log!("SpacePressed fallback -> FocusTextInput(space)");
+            Task::done(Message::FocusTextInput(Move::Forwards(" ".to_string())))
+        }
+
+        Message::CycleLauncherMode { reverse } => {
+            if !tile.visible || tile.show_actions {
+                return Task::none();
+            }
+            let Some(current) = launcher_mode_from_page(&tile.page) else {
+                return Task::none();
+            };
+            let target = cycle_launcher_mode(current, reverse);
+            Task::done(Message::SwitchLauncherMode(target))
+        }
+
+        Message::SwitchLauncherMode(mode) => {
+            if !tile.visible {
+                return Task::none();
+            }
+            let target_page = page_for_launcher_mode(mode);
+            if tile.show_actions {
+                tile.show_actions = false;
+                tile.actions.clear();
+            }
+            close_clipboard_preview(tile);
+            tile.page = target_page;
+            tile.focus_id = 0;
+            // Keep lowercase query in sync when switching modes so APP mode
+            // immediately uses the current input for matching.
+            tile.query_lc = tile.query.trim().to_lowercase();
+            coco_log!(
+                "SwitchLauncherMode -> page={:?} query={:?} query_lc={:?}",
+                tile.page,
+                tile.query,
+                tile.query_lc
+            );
+            Task::batch([
+                apply_current_query_for_active_mode(tile),
+                operation::focus("query"),
+            ])
         }
 
         Message::ReloadConfig => {
@@ -554,22 +715,22 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::SwitchToPage(page) => {
+            close_clipboard_preview(tile);
             tile.page = page.clone();
             let banner_h = permission_banner_height(tile);
             let resize = match &tile.page {
                 Page::ClipboardHistory => {
                     tile.clipboard_rebuild_filtered();
-                    let content_h = if tile.clipboard_display_count() > 0 {
-                        360.0
-                    } else {
-                        0.0
-                    };
+                    let content_h = clipboard_content_height(tile);
                     tile.snap_resize(blur_height(banner_h, content_h))
                 }
                 Page::AgentList => {
                     tile.agent_sessions = crate::agent::session::list_sessions();
-                    let rows = std::cmp::min(1 + tile.agent_sessions.len(), 7) as f64;
-                    tile.snap_resize(blur_height(banner_h, rows * ROW_HEIGHT))
+                    tile.agent_filtered = (0..tile.agent_sessions.len()).collect();
+                    tile.snap_resize(blur_height(
+                        banner_h,
+                        agent_list_content_height(tile.agent_display_count()),
+                    ))
                 }
                 Page::WindowSwitcher => {
                     tile.window_list = platform::get_window_list();
@@ -589,11 +750,16 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::RunFunction(command) => {
+            if let Function::Calculate(expr) = &command {
+                return handle_calculator_enter(tile, expr);
+            }
+
             command.execute(&tile.config, &tile.query);
 
             let return_focus_task = match &command {
                 Function::OpenApp(_)
                 | Function::ActivateApp(_)
+                | Function::OpenTerminal
                 | Function::OpenPrefPane
                 | Function::GoogleSearch(_)
                 | Function::ShowInFinder(_) => Task::none(),
@@ -655,6 +821,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.focused = false;
             tile.show_animating = false;
             tile.hide_animating = true;
+            close_clipboard_preview(tile);
             tile.pending_window_height = None;
             tile.window_resize_token = tile.window_resize_token.wrapping_add(1);
             // Always reset to Main so next open starts fresh
@@ -682,7 +849,12 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 coco_log!("NativeHideComplete: visible=true, hide was cancelled");
                 return Task::none();
             }
-            tile.restore_frontmost();
+            let should_paste = tile.pending_paste_after_hide;
+            tile.pending_paste_after_hide = false;
+            let target_pid = tile.restore_frontmost();
+            if should_paste {
+                platform::paste_to_frontmost(target_pid);
+            }
 
             let hide_task = if let Some(wid) = tile.main_window_id {
                 window::set_mode::<Message>(wid, window::Mode::Hidden)
@@ -830,7 +1002,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::ReturnFocus => {
-            tile.restore_frontmost();
+            let _ = tile.restore_frontmost();
             Task::none()
         }
 
@@ -897,31 +1069,6 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.clipboard_store.push(content);
             tile.clipboard_rebuild_filtered();
             Task::none()
-        }
-
-        Message::ToggleAgentMode => {
-            if !tile.visible {
-                // Launcher not shown: open it and switch to agent list
-                if let Some(wid) = tile.main_window_id {
-                    platform::prepare_show_animation();
-                    return window::set_mode::<Message>(wid, window::Mode::Windowed)
-                        .chain(Task::done(Message::OpenWindow(Some(wid))))
-                        .chain(Task::done(Message::SwitchToPage(Page::AgentList)));
-                }
-                return Task::none();
-            }
-            if tile.page == Page::AgentList {
-                tile.page = Page::Main;
-                let banner_h = permission_banner_height(tile);
-                let resize = tile.snap_resize(blur_height(banner_h, 0.0));
-                Task::batch([
-                    resize,
-                    Task::done(Message::ClearSearchQuery),
-                    Task::done(Message::ClearSearchResults),
-                ])
-            } else {
-                Task::done(Message::SwitchToPage(Page::AgentList))
-            }
         }
 
         Message::AgentSessionSelected(sid) => {
@@ -1137,6 +1284,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     let id = entry.id;
                     tile.clipboard_store.toggle_pin(id);
                     tile.clipboard_rebuild_filtered();
+                    if tile.clipboard_quick_preview_open {
+                        if let Some(content) = focused_clipboard_content(tile) {
+                            platform::update_clipboard_preview_panel(content);
+                        } else {
+                            close_clipboard_preview(tile);
+                        }
+                    }
                 }
             }
             Task::none()
@@ -1156,11 +1310,23 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     let count = tile.clipboard_display_count();
                     if count == 0 {
                         tile.focus_id = 0;
+                        close_clipboard_preview(tile);
                     } else if tile.focus_id as usize >= count {
                         tile.focus_id = (count - 1) as u32;
                     }
+                    if count > 0 && tile.clipboard_quick_preview_open {
+                        if let Some(content) = focused_clipboard_content(tile) {
+                            platform::update_clipboard_preview_panel(content);
+                        } else {
+                            close_clipboard_preview(tile);
+                        }
+                    }
                     let banner_h = permission_banner_height(tile);
-                    let content_h = if count > 0 { 360.0 } else { 0.0 };
+                    let content_h = if count > 0 {
+                        clipboard_content_height(tile)
+                    } else {
+                        0.0
+                    };
                     return tile.snap_resize(blur_height(banner_h, content_h));
                 }
             }
@@ -1168,6 +1334,44 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::SearchQueryChanged(input, _id) => {
+            // ClipboardHistory reserves Space for native preview panel toggle.
+            // `text_input` may still emit an on_input update containing the
+            // appended space, so swallow that single-space append here.
+            if tile.page == Page::ClipboardHistory && input == format!("{} ", tile.query) {
+                if !tile.show_actions {
+                    if tile.clipboard_quick_preview_open {
+                        close_clipboard_preview(tile);
+                        coco_log!(
+                            "SearchQueryChanged clipboard space append -> hide native preview"
+                        );
+                    } else if let Some(content) = focused_clipboard_content(tile).cloned() {
+                        tile.clipboard_quick_preview_open = true;
+                        platform::show_clipboard_preview_panel(&content);
+                        coco_log!(
+                            "SearchQueryChanged clipboard space append -> show native preview"
+                        );
+                    } else {
+                        close_clipboard_preview(tile);
+                        coco_log!("SearchQueryChanged clipboard space append -> no focused entry");
+                    }
+                }
+                coco_log!(
+                    "SearchQueryChanged swallow clipboard space append: prev={:?} next={:?}",
+                    tile.query,
+                    input
+                );
+                return Task::none();
+            }
+
+            if tile.page == Page::ClipboardHistory {
+                close_clipboard_preview(tile);
+                coco_log!(
+                    "SearchQueryChanged clipboard apply: prev={:?} next={:?}",
+                    tile.query,
+                    input
+                );
+            }
+
             tile.focus_id = 0;
 
             if tile.config.haptic_feedback {
@@ -1187,11 +1391,16 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 tile.focus_id = 0;
                 tile.clipboard_rebuild_filtered();
                 let banner_h = permission_banner_height(tile);
-                let content_h = if tile.clipboard_display_count() > 0 {
-                    360.0
-                } else {
-                    0.0
-                };
+                let content_h = clipboard_content_height(tile);
+                return tile.snap_resize(blur_height(banner_h, content_h));
+            }
+
+            // AgentList page: filter sessions in-place, keep query text
+            if tile.page == Page::AgentList {
+                tile.focus_id = 0;
+                tile.agent_rebuild_filtered();
+                let banner_h = permission_banner_height(tile);
+                let content_h = agent_list_content_height(tile.agent_display_count());
                 return tile.snap_resize(blur_height(banner_h, content_h));
             }
 
@@ -1255,142 +1464,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             } else if tile.query_lc == "main" {
                 tile.page = Page::Main
             }
-            tile.handle_search_query_changed();
-
-            if tile.results.is_empty()
-                && let Some(res) = Expr::from_str(&tile.query).ok()
-            {
-                tile.results.push(App {
-                    open_command: AppCommand::Function(Function::Calculate(res.clone())),
-                    desc: COCO_DESC_NAME.to_string(),
-                    icons: None,
-                    name: res.eval().map(|x| x.to_string()).unwrap_or("".to_string()),
-                    name_lc: "".to_string(),
-                    localized_name: None,
-                    category: None,
-                    bundle_path: None,
-                    bundle_id: None,
-                    pid: None,
-                });
-            } else if tile.results.is_empty()
-                && let Some(conversions) = unit_conversion::convert_query(&tile.query)
-            {
-                tile.results = conversions
-                    .into_iter()
-                    .map(|conversion| {
-                        let source = format!(
-                            "{} {}",
-                            unit_conversion::format_number(conversion.source_value),
-                            conversion.source_unit.name
-                        );
-                        let target = format!(
-                            "{} {}",
-                            unit_conversion::format_number(conversion.target_value),
-                            conversion.target_unit.name
-                        );
-                        App {
-                            open_command: AppCommand::Function(Function::CopyToClipboard(
-                                ClipBoardContentType::Text(target.clone()),
-                            )),
-                            desc: source,
-                            icons: None,
-                            name: target,
-                            name_lc: String::new(),
-                            localized_name: None,
-                            category: None,
-                            bundle_path: None,
-                            bundle_id: None,
-                            pid: None,
-                        }
-                    })
-                    .collect();
-            } else if tile.results.is_empty()
-                && let Some(conversions) = currency_conversion::convert_query(&tile.query)
-            {
-                tile.results = conversions
-                    .into_iter()
-                    .map(|c| {
-                        let formatted =
-                            currency_conversion::format_currency(c.target_value, c.target_code);
-                        let target_name = currency_conversion::currency_name_cn(c.target_code);
-                        let source_name = currency_conversion::currency_name_cn(c.source_code);
-                        let copy_text = formatted.clone();
-                        App {
-                            open_command: AppCommand::Function(Function::CopyToClipboard(
-                                ClipBoardContentType::Text(copy_text),
-                            )),
-                            desc: format!(
-                                "{} {}{} {} → {} · 汇率 {:.4} · {}",
-                                currency_conversion::currency_flag(c.source_code),
-                                currency_conversion::currency_symbol(c.source_code),
-                                currency_conversion::format_currency(c.source_value, c.source_code),
-                                source_name,
-                                target_name,
-                                c.rate,
-                                c.updated_at,
-                            ),
-                            icons: None,
-                            name: format!(
-                                "{} {}{} {}",
-                                currency_conversion::currency_flag(c.target_code),
-                                currency_conversion::currency_symbol(c.target_code),
-                                formatted,
-                                c.target_code,
-                            ),
-                            name_lc: String::new(),
-                            localized_name: None,
-                            category: None,
-                            bundle_path: None,
-                            bundle_id: None,
-                            pid: None,
-                        }
-                    })
-                    .collect();
-            } else if tile.results.is_empty() && is_valid_url(&tile.query) {
-                tile.results.push(App {
-                    open_command: AppCommand::Function(Function::OpenWebsite(tile.query.clone())),
-                    desc: "Web Browsing".to_string(),
-                    icons: None,
-                    name: "Open Website: ".to_string() + &tile.query,
-                    name_lc: "".to_string(),
-                    localized_name: None,
-                    category: None,
-                    bundle_path: None,
-                    bundle_id: None,
-                    pid: None,
-                });
-            } else if tile.query_lc.split(' ').count() > 1 {
-                tile.results.push(App {
-                    open_command: AppCommand::Function(Function::GoogleSearch(tile.query.clone())),
-                    icons: None,
-                    desc: "Web Search".to_string(),
-                    name: format!("Search for: {}", tile.query),
-                    name_lc: String::new(),
-                    localized_name: None,
-                    category: None,
-                    bundle_path: None,
-                    bundle_id: None,
-                    pid: None,
-                });
-            } else if tile.results.is_empty() && tile.query_lc == "lemon" {
-                tile.results.push(App {
-                    open_command: AppCommand::Display,
-                    desc: "Easter Egg".to_string(),
-                    icons: Some(Handle::from_path(Path::new(
-                        "/Applications/Coco.app/Contents/Resources/lemon.png",
-                    ))),
-                    name: "Lemon".to_string(),
-                    name_lc: "".to_string(),
-                    localized_name: None,
-                    category: None,
-                    bundle_path: None,
-                    bundle_id: None,
-                    pid: None,
-                });
-            }
-            if !tile.query_lc.is_empty() && tile.page == Page::EmojiSearch {
-                tile.results = tile.emoji_apps.all();
-            }
+            rebuild_results_for_current_query(tile);
 
             let has_results_now = !tile.results.is_empty();
             let banner_h = permission_banner_height(tile);
@@ -1399,7 +1473,12 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             // since only the native child NSWindow is resized, not the main window.
             let scrollable_h =
                 if tile.page == Page::ClipboardHistory && tile.clipboard_display_count() > 0 {
-                    360.0
+                    clipboard_content_height(tile)
+                } else if tile.page == Page::Main && !tile.query_lc.is_empty() && !has_results_now {
+                    crate::app::MAIN_EMPTY_STATE_HEIGHT
+                } else if tile.page == Page::Main && has_results_now && !tile.query_lc.is_empty() {
+                    search_results_scrollable_height(&tile.results)
+                        .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
                 } else if has_results_now {
                     let rows = std::cmp::min(tile.results.len(), 7) as f64;
                     rows * ROW_HEIGHT
@@ -1566,6 +1645,21 @@ pub fn zero_query_scrollable_height(results: &[App]) -> f64 {
     row_h + header_h + ZQ_COL_PADDING_V
 }
 
+/// Calculate the scrollable content height for the search-results list
+/// when the "APPS" section header is shown.
+pub fn search_results_scrollable_height(results: &[App]) -> f64 {
+    use crate::app::{ROW_HEIGHT, ZQ_COL_PADDING_V, ZQ_HEADER_HEIGHT};
+    if results.is_empty() {
+        return 0.0;
+    }
+    let header_h = if search_results_has_header(results) {
+        ZQ_HEADER_HEIGHT
+    } else {
+        0.0
+    };
+    ZQ_COL_PADDING_V + header_h + (results.len() as f64 * ROW_HEIGHT)
+}
+
 /// Y-offset (inside the zero-query scroll content) of the focused result row.
 /// Includes top padding and section headers ("RUNNING", "RECENT") inserted
 /// before grouped rows.
@@ -1602,6 +1696,551 @@ fn zero_query_focus_offset(results: &[App], focus_index: usize) -> f64 {
     y
 }
 
+/// Y-offset (inside search results scroll content) of the focused row when
+/// the "APPS" header is rendered above the results.
+fn search_results_focus_offset(results: &[App], focus_index: usize) -> f64 {
+    use crate::app::{ROW_HEIGHT, ZQ_COL_PADDING_V, ZQ_HEADER_HEIGHT};
+    let header_h = if search_results_has_header(results) {
+        ZQ_HEADER_HEIGHT
+    } else {
+        0.0
+    };
+    ZQ_COL_PADDING_V * 0.5 + header_h + (focus_index as f64 * ROW_HEIGHT)
+}
+
+fn search_results_has_header(results: &[App]) -> bool {
+    !results.is_empty()
+        && !results.iter().all(|app| {
+            app.name_lc.starts_with("__calc__|") || app.name_lc.starts_with("__calc_history__|")
+        })
+}
+
+fn launcher_mode_from_page(page: &Page) -> Option<LauncherMode> {
+    match page {
+        Page::Main => Some(LauncherMode::App),
+        Page::ClipboardHistory => Some(LauncherMode::Clipboard),
+        Page::AgentList => None,
+        _ => None,
+    }
+}
+
+fn page_for_launcher_mode(mode: LauncherMode) -> Page {
+    match mode {
+        LauncherMode::App => Page::Main,
+        LauncherMode::Clipboard => Page::ClipboardHistory,
+    }
+}
+
+fn cycle_launcher_mode(current: LauncherMode, reverse: bool) -> LauncherMode {
+    use LauncherMode::{App, Clipboard};
+    if reverse {
+        match current {
+            App => Clipboard,
+            Clipboard => App,
+        }
+    } else {
+        match current {
+            App => Clipboard,
+            Clipboard => App,
+        }
+    }
+}
+
+fn agent_list_content_height(display_count: usize) -> f64 {
+    let rows = std::cmp::min(display_count, 7) as f64;
+    rows * 52.0
+}
+
+fn mode_switch_snap_resize(tile: &mut Tile, target_h: f64) -> Task<Message> {
+    // Tab/click mode switching often only changes height by a few pixels
+    // (e.g. APP/Clipboard/Agent). Shrinking the native window every switch
+    // causes visible stutter. Keep current visual height unless the new mode
+    // needs more space.
+    if tile.target_blur_height > 0.0 && target_h + 1.0 < tile.target_blur_height {
+        coco_log!(
+            "mode-switch resize skipped shrink target={:.1} current_blur={:.1} page={:?}",
+            target_h,
+            tile.target_blur_height,
+            tile.page
+        );
+        return Task::none();
+    }
+
+    tile.snap_resize(target_h)
+}
+
+fn focused_clipboard_content(tile: &Tile) -> Option<&ClipBoardContentType> {
+    let entry_idx = *tile
+        .clipboard_display_indices()
+        .get(tile.focus_id as usize)?;
+    tile.clipboard_store
+        .get(entry_idx)
+        .map(|entry| &entry.content)
+}
+
+fn open_clipboard_entry(tile: &mut Tile, display_idx: u32) -> Task<Message> {
+    let indices = tile.clipboard_display_indices();
+    coco_log!(
+        "open_clipboard_entry try: display_idx={} display_len={} store_len={} focus_id={}",
+        display_idx,
+        indices.len(),
+        tile.clipboard_store.len(),
+        tile.focus_id
+    );
+    if let Some(&entry_idx) = indices.get(display_idx as usize)
+        && let Some(entry) = tile.clipboard_store.get(entry_idx)
+    {
+        tile.focus_id = display_idx;
+        match &entry.content {
+            ClipBoardContentType::Text(text) => {
+                arboard::Clipboard::new()
+                    .unwrap()
+                    .set_text(text.clone())
+                    .ok();
+            }
+            ClipBoardContentType::Image(img) => {
+                arboard::Clipboard::new()
+                    .unwrap()
+                    .set_image(img.to_owned_img())
+                    .ok();
+            }
+        }
+        close_clipboard_preview(tile);
+        tile.pending_paste_after_hide = false;
+        tile.visible = false;
+        tile.focused = false;
+        tile.show_animating = false;
+        tile.hide_animating = false;
+        tile.page = Page::Main;
+        coco_log!(
+            "open_clipboard_entry: display_idx={} copied, scheduling hide+paste",
+            display_idx
+        );
+
+        let hide_task = if let Some(wid) = tile.main_window_id {
+            window::set_mode::<Message>(wid, window::Mode::Hidden)
+        } else {
+            Task::none()
+        };
+        let paste_task = Task::perform(
+            async {
+                // Give the window hide state one short frame to settle, then paste quickly.
+                tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+            },
+            |_| Message::ClipboardFinalizePaste,
+        );
+
+        return if tile.config.buffer_rules.clear_on_hide {
+            Task::batch([
+                hide_task,
+                paste_task,
+                Task::done(Message::ClearSearchQuery),
+                Task::done(Message::ClearSearchResults),
+            ])
+        } else {
+            Task::batch([hide_task, paste_task])
+        };
+    }
+
+    coco_log!(
+        "open_clipboard_entry miss: display_idx={} display_len={}",
+        display_idx,
+        indices.len()
+    );
+    Task::none()
+}
+
+fn handle_calculator_enter(tile: &mut Tile, expr: &Expr) -> Task<Message> {
+    let Some(value) = expr.eval() else {
+        return Task::none();
+    };
+
+    let expression = format_calculator_expression(&tile.query);
+    let result_text = format_calculator_value(value);
+    let history_line = format!("{expression} = {result_text}");
+    tile.calculator_history
+        .retain(|h| !(h.expression == expression && h.result == result_text));
+    tile.calculator_history.insert(
+        0,
+        crate::app::tile::CalculatorHistoryEntry {
+            expression: expression.clone(),
+            result: result_text.clone(),
+        },
+    );
+    tile.calculator_history.truncate(60);
+
+    // Record formula + result in clipboard history for later lookup.
+    tile.clipboard_store
+        .push(ClipBoardContentType::Text(history_line));
+
+    // Keep calculator in-place for chained calculations.
+    tile.page = Page::Main;
+    tile.query = result_text.clone();
+    tile.query_lc = result_text.to_lowercase();
+    tile.focus_id = 0;
+    tile.last_query_edit_time = Some(std::time::Instant::now());
+    tile.suppress_row_hover_focus = true;
+    close_clipboard_preview(tile);
+
+    rebuild_results_for_current_query(tile);
+
+    let has_results_now = !tile.results.is_empty();
+    let banner_h = permission_banner_height(tile);
+    let scrollable_h = if !tile.query_lc.is_empty() && !has_results_now {
+        crate::app::MAIN_EMPTY_STATE_HEIGHT
+    } else if has_results_now {
+        search_results_scrollable_height(&tile.results).min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
+    } else {
+        0.0
+    };
+
+    let resize = tile.snap_resize(blur_height(banner_h, scrollable_h));
+    Task::batch([resize, operation::focus("query")])
+}
+
+fn close_clipboard_preview(tile: &mut Tile) {
+    tile.clipboard_quick_preview_open = false;
+    platform::hide_clipboard_preview_panel();
+}
+
+fn clipboard_content_height(tile: &Tile) -> f64 {
+    if tile.clipboard_display_count() == 0 {
+        0.0
+    } else {
+        crate::app::CLIPBOARD_CONTENT_HEIGHT
+    }
+}
+
+fn apply_current_query_for_active_mode(tile: &mut Tile) -> Task<Message> {
+    let banner_h = permission_banner_height(tile);
+
+    match tile.page {
+        Page::ClipboardHistory => {
+            tile.focus_id = 0;
+            tile.clipboard_rebuild_filtered();
+            let content_h = clipboard_content_height(tile);
+            mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+        }
+        Page::AgentList => {
+            tile.focus_id = 0;
+            if tile.agent_sessions.is_empty() {
+                tile.agent_refresh_sessions();
+            } else {
+                tile.agent_rebuild_filtered();
+            }
+            let content_h = agent_list_content_height(tile.agent_display_count());
+            mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+        }
+        Page::Main => {
+            tile.focus_id = 0;
+            if tile.query_lc.is_empty() {
+                tile.results = tile.zero_query_cache.clone();
+                let content_h = if tile.results.is_empty() {
+                    0.0
+                } else {
+                    zero_query_scrollable_height(&tile.results)
+                        .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
+                };
+                mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+            } else {
+                coco_log!(
+                    "apply_current_query_for_active_mode main(before): query={:?} query_lc={:?} results={}",
+                    tile.query,
+                    tile.query_lc,
+                    tile.results.len()
+                );
+                rebuild_results_for_current_query(tile);
+                coco_log!(
+                    "apply_current_query_for_active_mode main(after): query={:?} query_lc={:?} results={}",
+                    tile.query,
+                    tile.query_lc,
+                    tile.results.len()
+                );
+                let content_h = if tile.results.is_empty() {
+                    crate::app::MAIN_EMPTY_STATE_HEIGHT
+                } else {
+                    search_results_scrollable_height(&tile.results)
+                        .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
+                };
+                mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+            }
+        }
+        _ => Task::none(),
+    }
+}
+
+fn rebuild_results_for_current_query(tile: &mut Tile) {
+    coco_log!(
+        "rebuild_results(start): page={:?} query={:?} query_lc={:?}",
+        tile.page,
+        tile.query,
+        tile.query_lc
+    );
+    let calc_expr = Expr::from_str(&tile.query).ok();
+    let prefer_calculator =
+        calc_expr.is_some() && query_prefers_calculator(&tile.query, tile.page == Page::Main);
+
+    if prefer_calculator {
+        tile.results.clear();
+        coco_log!("rebuild_results(calc-preferred): skip app search");
+    } else {
+        tile.handle_search_query_changed();
+        coco_log!(
+            "rebuild_results(after app search): results={}",
+            tile.results.len()
+        );
+    }
+
+    if (prefer_calculator || tile.results.is_empty())
+        && let Some(res) = calc_expr
+        && let Some(value) = res.eval()
+    {
+        let expression = format_calculator_expression(&tile.query);
+        let value_text = format_calculator_value(value);
+        let current_line = format!("{expression} = {value_text}");
+        tile.results.push(App {
+            open_command: AppCommand::Function(Function::Calculate(res.clone())),
+            desc: COCO_DESC_NAME.to_string(),
+            icons: None,
+            name: current_line.clone(),
+            name_lc: format!("__calc__|{}", expression.to_lowercase()),
+            localized_name: None,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        });
+
+        if prefer_calculator {
+            for h in tile.calculator_history.iter() {
+                let line = format!("{} = {}", h.expression, h.result);
+                if line == current_line {
+                    continue;
+                }
+                tile.results.push(App {
+                    open_command: AppCommand::Message(Message::ApplyCalculatorInput(
+                        h.result.clone(),
+                    )),
+                    desc: "History".to_string(),
+                    icons: None,
+                    name: line,
+                    name_lc: format!("__calc_history__|{}", h.expression.to_lowercase()),
+                    localized_name: None,
+                    category: None,
+                    bundle_path: None,
+                    bundle_id: None,
+                    pid: None,
+                });
+                if tile.results.len() >= 9 {
+                    break;
+                }
+            }
+        }
+    } else if tile.results.is_empty()
+        && let Some(conversions) = unit_conversion::convert_query(&tile.query)
+    {
+        tile.results = conversions
+            .into_iter()
+            .map(|conversion| {
+                let source = format!(
+                    "{} {}",
+                    unit_conversion::format_number(conversion.source_value),
+                    conversion.source_unit.name
+                );
+                let target = format!(
+                    "{} {}",
+                    unit_conversion::format_number(conversion.target_value),
+                    conversion.target_unit.name
+                );
+                App {
+                    open_command: AppCommand::Function(Function::CopyToClipboard(
+                        ClipBoardContentType::Text(target.clone()),
+                    )),
+                    desc: source,
+                    icons: None,
+                    name: target,
+                    name_lc: String::new(),
+                    localized_name: None,
+                    category: None,
+                    bundle_path: None,
+                    bundle_id: None,
+                    pid: None,
+                }
+            })
+            .collect();
+    } else if let Some(conversions) = currency_conversion::convert_query(&tile.query) {
+        coco_log!(
+            "rebuild_results(currency): query={:?} conversions={}",
+            tile.query,
+            conversions.len()
+        );
+        tile.results = conversions
+            .into_iter()
+            .map(|c| {
+                let formatted_target =
+                    currency_conversion::format_currency(c.target_value, c.target_code);
+                let formatted_source =
+                    currency_conversion::format_currency(c.source_value, c.source_code);
+                let source_name = currency_conversion::currency_name_cn(c.source_code);
+                let target_name = currency_conversion::currency_name_cn(c.target_code);
+                let source_symbol = currency_conversion::currency_symbol(c.source_code);
+                let target_symbol = currency_conversion::currency_symbol(c.target_code);
+                let source_flag = currency_conversion::currency_flag(c.source_code);
+                let target_flag = currency_conversion::currency_flag(c.target_code);
+
+                let source_display = if source_symbol.is_empty() {
+                    format!("{formatted_source} {}", c.source_code)
+                } else {
+                    format!("{source_symbol}{formatted_source} {}", c.source_code)
+                };
+                let target_display = if target_symbol.is_empty() {
+                    format!("{formatted_target} {}", c.target_code)
+                } else {
+                    format!("{target_symbol}{formatted_target} {}", c.target_code)
+                };
+                let source_head = format!("{source_flag} {source_display}");
+                let target_head = format!("{target_flag} {target_display}");
+
+                let copy_text = target_display.clone();
+                App {
+                    open_command: AppCommand::Function(Function::CopyToClipboard(
+                        ClipBoardContentType::Text(copy_text),
+                    )),
+                    desc: format!(
+                        "{} ({}) → {} ({}) · 1 {} = {:.4} {}",
+                        source_head,
+                        source_name,
+                        target_head,
+                        target_name,
+                        c.source_code,
+                        c.rate,
+                        c.target_code,
+                    ),
+                    icons: None,
+                    name: target_head,
+                    name_lc: format!("__currency__|{}|{}", c.source_code, c.target_code),
+                    localized_name: None,
+                    category: None,
+                    bundle_path: None,
+                    bundle_id: None,
+                    pid: None,
+                }
+            })
+            .collect();
+    } else if tile.results.is_empty() && is_valid_url(&tile.query) {
+        tile.results.push(App {
+            open_command: AppCommand::Function(Function::OpenWebsite(tile.query.clone())),
+            desc: "Web Browsing".to_string(),
+            icons: None,
+            name: "Open Website: ".to_string() + &tile.query,
+            name_lc: "".to_string(),
+            localized_name: None,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        });
+    } else if tile.query_lc.split(' ').count() > 1 {
+        tile.results.push(App {
+            open_command: AppCommand::Function(Function::GoogleSearch(tile.query.clone())),
+            icons: None,
+            desc: "Web Search".to_string(),
+            name: format!("Search for: {}", tile.query),
+            name_lc: String::new(),
+            localized_name: None,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        });
+    } else if tile.results.is_empty() && tile.query_lc == "lemon" {
+        tile.results.push(App {
+            open_command: AppCommand::Display,
+            desc: "Easter Egg".to_string(),
+            icons: Some(Handle::from_path(Path::new(
+                "/Applications/Coco.app/Contents/Resources/lemon.png",
+            ))),
+            name: "Lemon".to_string(),
+            name_lc: "".to_string(),
+            localized_name: None,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        });
+    }
+
+    if !tile.query_lc.is_empty() && tile.page == Page::EmojiSearch {
+        tile.results = tile.emoji_apps.all();
+    }
+    coco_log!("rebuild_results(done): results={}", tile.results.len());
+}
+
+fn format_calculator_expression(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 8);
+    for ch in query.trim().chars() {
+        match ch {
+            '+' | '-' | '/' | '^' => {
+                out.push(' ');
+                out.push(ch);
+                out.push(' ');
+            }
+            '*' | 'x' | 'X' | '×' => {
+                out.push(' ');
+                out.push('x');
+                out.push(' ');
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    let compact = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    compact.replace("( ", "(").replace(" )", ")")
+}
+
+fn format_calculator_value(value: f64) -> String {
+    let normalized = if value.abs() < 1e-12 { 0.0 } else { value };
+    if (normalized - normalized.round()).abs() < 1e-10 {
+        return format!("{}", normalized.round() as i64);
+    }
+
+    let mut s = format!("{normalized:.10}");
+    if let Some(dot_pos) = s.find('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') && dot_pos == s.len() - 1 {
+            s.pop();
+        }
+    }
+    s
+}
+
+fn query_prefers_calculator(query: &str, on_main_page: bool) -> bool {
+    if !on_main_page {
+        return false;
+    }
+
+    let q = query.trim();
+    if q.is_empty() || !q.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    if q.to_ascii_lowercase().contains("http") {
+        return false;
+    }
+
+    q.chars().all(|c| {
+        c.is_ascii_digit()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                '.' | ',' | '+' | '-' | '*' | '/' | '^' | '(' | ')' | 'x' | 'X' | '×'
+            )
+            || matches!(c, 'l' | 'L' | 'o' | 'O' | 'g' | 'G' | 'n' | 'N' | 'e' | 'E')
+    })
+}
+
 /// Compute the total blur-window height from its parts.
 ///
 /// `content_h` is the scrollable area height (0 when there are no results).
@@ -1622,7 +2261,9 @@ fn permission_banner_height(tile: &Tile) -> f64 {
     if tile.permissions_ok {
         return 0.0;
     }
-    let count = tile.missing_accessibility as u32 + tile.missing_input_monitoring as u32;
+    let count = tile.missing_accessibility as u32
+        + tile.missing_input_monitoring as u32
+        + tile.missing_paste_permission as u32;
     if count == 0 {
         return 0.0;
     }

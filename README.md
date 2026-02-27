@@ -80,6 +80,10 @@ creates the default configuration for you, but it does use its
 configure [The list](docs/config.toml) The blurring is still a bit wonky, and
 will be fixed in the upcoming releases
 
+You can also set `terminal_app` in `~/.config/coco/config.toml` to control
+which terminal opens from the built-in "Open Terminal" item (for example:
+`Terminal`, `Ghostty`, or `iTerm`).
+
 ## Feature list:
 
 ### Finished:

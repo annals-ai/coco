@@ -170,6 +170,10 @@ impl<'a> Lexer<'a> {
                 self.bump_char();
                 Token::Star
             }
+            'x' | 'X' | '×' => {
+                self.bump_char();
+                Token::Star
+            }
             '/' => {
                 self.bump_char();
                 Token::Slash
@@ -384,5 +388,22 @@ impl<'a> Parser<'a> {
             }
             _ => Err(format!("Unexpected token: {:?}", self.cur)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Expr;
+
+    #[test]
+    fn parser_supports_x_as_multiplication() {
+        let expr = Expr::from_str("2 x 3").expect("should parse x operator");
+        assert_eq!(expr.eval(), Some(6.0));
+    }
+
+    #[test]
+    fn parser_supports_times_symbol_as_multiplication() {
+        let expr = Expr::from_str("4×5").expect("should parse times operator");
+        assert_eq!(expr.eval(), Some(20.0));
     }
 }

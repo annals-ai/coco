@@ -7,7 +7,7 @@ use iced::{
     Alignment,
     Length::Fill,
     font::Weight,
-    widget::{Button, Row, Text, container, image, text::Wrapping},
+    widget::{Button, Row, Text, container, image, mouse_area, text::Wrapping},
 };
 
 use crate::{
@@ -172,11 +172,11 @@ impl App {
                 None,
             ),
             App::simple(
-                AppCommand::Message(Message::SwitchToPage(Page::AgentList)),
+                AppCommand::Function(Function::OpenTerminal),
                 COCO_DESC_NAME.to_string(),
                 icon(),
-                "Agent Mode".to_string(),
-                "agent".to_string(),
+                "Open Terminal".to_string(),
+                "terminal agent".to_string(),
                 None,
             ),
         ]
@@ -190,12 +190,16 @@ impl App {
         focussed_id: u32,
     ) -> iced::Element<'static, Message> {
         let focused = focussed_id == id_num;
+        let is_currency_result = self.name_lc.starts_with("__currency__|");
+        let is_calculator_result = self.name_lc.starts_with("__calc__|")
+            || self.name_lc.starts_with("__calc_history__|");
+
         let is_app_result = matches!(
             &self.open_command,
             AppCommand::Function(Function::OpenApp(_) | Function::ActivateApp(_))
         );
         let desc_is_generic = matches!(self.desc.as_str(), "Application" | "Finder" | "Utility");
-        let show_subtitle = !(is_app_result || desc_is_generic);
+        let show_subtitle = !(is_app_result || desc_is_generic || is_calculator_result);
         let mut title_font = theme.font();
         title_font.weight = Weight::Semibold;
         let title_size = if show_subtitle { 17 } else { 18 };
@@ -203,14 +207,14 @@ impl App {
         // Title + subtitle
         let title_opacity = if focused { 1.00 } else { 0.96 };
         let desc_opacity = if focused { 0.78 } else { 0.62 };
-        let title = Text::new(self.name)
+        let title = Text::new(self.name.clone())
             .font(title_font)
             .size(title_size)
             .wrapping(Wrapping::WordOrGlyph)
             .color(theme.text_color(title_opacity));
         let text_block = if show_subtitle {
             iced::widget::Column::new().spacing(1).push(title).push(
-                Text::new(self.desc)
+                Text::new(self.desc.clone())
                     .font(theme.font())
                     .size(12)
                     .color(theme.text_color(desc_opacity)),
@@ -225,7 +229,7 @@ impl App {
             .spacing(RESULT_ROW_CONTENT_GAP)
             .height(RESULT_ROW_CONTENT_HEIGHT);
 
-        if theme.show_icons {
+        if theme.show_icons && !is_currency_result && !is_calculator_result {
             if let Some(icon) = &self.icons {
                 row = row.push(
                     container(
@@ -259,20 +263,55 @@ impl App {
             AppCommand::Display => None,
         };
 
-        let theme_clone = theme.clone();
+        let theme_for_button = theme.clone();
+        let theme_for_container = theme;
+        let calc_button_style = is_calculator_result;
+        let calc_container_style = is_calculator_result;
 
         let content = Button::new(row)
             .on_press_maybe(msg)
-            .style(move |_, _| result_button_style(&theme_clone))
+            .style(move |_, status| {
+                if calc_button_style {
+                    iced::widget::button::Style {
+                        text_color: theme_for_button.text_color(0.95),
+                        background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                        border: iced::Border {
+                            color: iced::Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: iced::border::Radius::new(8.0),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    result_button_style(&theme_for_button, focused, status)
+                }
+            })
             .width(Fill)
             .padding(0)
             .height(RESULT_ROW_CONTENT_HEIGHT);
 
-        container(content)
+        let row_container = container(content)
             .id(format!("result-{}", id_num))
-            .style(move |_| result_row_container_style(&theme, focused))
+            .style(move |_| {
+                if calc_container_style {
+                    iced::widget::container::Style {
+                        background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                        border: iced::Border {
+                            color: iced::Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: iced::border::Radius::new(12.0),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    result_row_container_style(&theme_for_container, focused)
+                }
+            })
             .padding([RESULT_ROW_PADDING_Y, RESULT_ROW_PADDING_X])
-            .width(Fill)
+            .width(Fill);
+
+        mouse_area(row_container)
+            .on_enter(Message::HoverResult(id_num))
             .into()
     }
 
@@ -389,16 +428,19 @@ impl App {
 
         let content = Button::new(row)
             .on_press_maybe(msg)
-            .style(move |_, _| result_button_style(&theme_clone))
+            .style(move |_, status| result_button_style(&theme_clone, focused, status))
             .width(Fill)
             .padding(0)
             .height(RESULT_ROW_CONTENT_HEIGHT);
 
-        container(content)
+        let row_container = container(content)
             .id(format!("result-{}", id_num))
             .style(move |_| result_row_container_style(&theme, focused))
             .padding([RESULT_ROW_PADDING_Y, RESULT_ROW_PADDING_X])
-            .width(Fill)
+            .width(Fill);
+
+        mouse_area(row_container)
+            .on_enter(Message::HoverResult(id_num))
             .into()
     }
 }

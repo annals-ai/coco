@@ -25,6 +25,7 @@ pub enum Function {
     CopyToClipboard(ClipBoardContentType),
     GoogleSearch(String),
     Calculate(Expr),
+    OpenTerminal,
     OpenPrefPane,
     Quit,
 }
@@ -129,6 +130,11 @@ impl Function {
                     .unwrap_or(());
             }
 
+            Function::OpenTerminal => {
+                let terminal_app = config.terminal_app.trim().to_string();
+                thread::spawn(move || open_terminal_window(&terminal_app));
+            }
+
             Function::CopyToClipboard(clipboard_content) => match clipboard_content {
                 ClipBoardContentType::Text(text) => {
                     Clipboard::new().unwrap().set_text(text).ok();
@@ -150,5 +156,38 @@ impl Function {
             }
             Function::Quit => std::process::exit(0),
         }
+    }
+}
+
+fn open_terminal_window(app_name: &str) {
+    if app_name.is_empty() {
+        return;
+    }
+
+    let app_lc = app_name.to_ascii_lowercase();
+
+    if app_lc == "terminal" || app_lc == "terminal.app" {
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(r#"tell application "Terminal" to do script """#)
+            .spawn();
+        return;
+    }
+
+    if app_lc == "iterm" || app_lc == "iterm2" || app_lc == "iterm.app" {
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(r#"tell application "iTerm" to create window with default profile"#)
+            .spawn();
+        return;
+    }
+
+    if Command::new("open")
+        .arg("-na")
+        .arg(app_name)
+        .spawn()
+        .is_err()
+    {
+        let _ = Command::new("open").arg("-a").arg(app_name).spawn();
     }
 }

@@ -70,6 +70,12 @@ impl Drop for ExtSender {
 /// Re-export AppIndex from the search module
 pub type AppIndex = search::AppIndex;
 
+#[derive(Debug, Clone)]
+pub struct CalculatorHistoryEntry {
+    pub expression: String,
+    pub result: String,
+}
+
 /// This is the base window, and its a "Tile"
 /// Its fields are:
 /// - Theme ([`iced::Theme`])
@@ -102,12 +108,14 @@ pub struct Tile {
     clipboard_hotkey: Option<HotKey>,
     pub clipboard_store: ClipboardStore,
     pub clipboard_filtered: Vec<usize>,
+    pub clipboard_quick_preview_open: bool,
     tray_icon: Option<TrayIcon>,
     sender: Option<ExtSender>,
     page: Page,
     fuzzy_matcher: RefCell<Matcher>,
     // Agent mode fields
     pub agent_sessions: Vec<AgentSession>,
+    pub agent_filtered: Vec<usize>,
     pub agent_window_id: Option<window::Id>,
     pub agent_session_id: Option<String>,
     pub agent_messages: Vec<ChatMessage>,
@@ -118,6 +126,7 @@ pub struct Tile {
     pub permissions_ok: bool,
     pub missing_accessibility: bool,
     pub missing_input_monitoring: bool,
+    pub missing_paste_permission: bool,
     // Zero-query cache (built once on window open, reused on empty query)
     pub zero_query_cache: Vec<App>,
     // Actions overlay (⌘K)
@@ -144,6 +153,12 @@ pub struct Tile {
     pub last_hotkey_time: Option<std::time::Instant>,
     /// Last search text edit instant (used to gate shrink resizes until idle).
     pub last_query_edit_time: Option<std::time::Instant>,
+    /// When true, row hover events are ignored until the mouse moves again.
+    pub suppress_row_hover_focus: bool,
+    /// When true, trigger Cmd+V to the restored frontmost app after hide completes.
+    pub pending_paste_after_hide: bool,
+    /// In-memory calculator history shown in the calculator UI.
+    pub calculator_history: Vec<CalculatorHistoryEntry>,
 }
 
 impl Tile {
@@ -373,7 +388,6 @@ impl Tile {
             Subscription::run(handle_recipient),
             Subscription::run(handle_hot_reloading),
             Subscription::run(handle_clipboard_history),
-            Subscription::run(handle_double_tap_option),
             anim_completion_poll,
             window::close_events().map(Message::AgentWindowClosed),
             keyboard::listen().filter_map(|event| {
@@ -394,22 +408,43 @@ impl Tile {
                         keyboard::Key::Named(Named::ArrowDown) => {
                             return Some(Message::ChangeFocus(ArrowKey::Down));
                         }
+                        keyboard::Key::Named(Named::Tab) => {
+                            return Some(Message::CycleLauncherMode {
+                                reverse: modifiers.shift(),
+                            });
+                        }
+                        keyboard::Key::Named(Named::Space) => {
+                            coco_log!(
+                                "keyboard::listen Named::Space page? main-window event emitted SpacePressed"
+                            );
+                            return Some(Message::SpacePressed);
+                        }
                         keyboard::Key::Character(chr) => {
-                            if modifiers.command() && chr.to_string().to_lowercase() == "k" {
+                            let chr_s = chr.to_string();
+                            if chr_s == " " && !modifiers.command() {
+                                coco_log!(
+                                    "keyboard::listen Character(space) emitted SpacePressed shift={} ctrl={} alt={} cmd={}",
+                                    modifiers.shift(),
+                                    modifiers.control(),
+                                    modifiers.alt(),
+                                    modifiers.command()
+                                );
+                                return Some(Message::SpacePressed);
+                            } else if modifiers.command() && chr_s.to_lowercase() == "k" {
                                 return Some(Message::ShowActions);
-                            } else if modifiers.command() && chr.to_string().to_lowercase() == "r" {
+                            } else if modifiers.command() && chr_s.to_lowercase() == "r" {
                                 return Some(Message::ReloadConfig);
-                            } else if modifiers.command() && chr.to_string().to_lowercase() == "p" {
+                            } else if modifiers.command() && chr_s.to_lowercase() == "p" {
                                 return Some(Message::ClipboardTogglePinFocused);
-                            } else if modifiers.command() && chr.to_string().to_lowercase() == "d" {
+                            } else if modifiers.command() && chr_s.to_lowercase() == "d" {
                                 return Some(Message::ClipboardDeleteFocused);
-                            } else if modifiers.command() && chr.to_string() == "," {
+                            } else if modifiers.command() && chr_s == "," {
                                 open_settings();
-                            } else {
-                                return Some(Message::FocusTextInput(Move::Forwards(
-                                    chr.to_string(),
-                                )));
                             }
+                            // Let iced text_input handle normal character input directly.
+                            // Forwarding raw keyboard characters here can break non-US layouts
+                            // (e.g. `¥` key being interpreted as `$`).
+                            return None;
                         }
                         keyboard::Key::Named(Named::Enter) => return Some(Message::OpenFocused),
                         keyboard::Key::Named(Named::Backspace) => {
@@ -471,21 +506,80 @@ impl Tile {
         self.clipboard_filtered = self.clipboard_store.search(&query, &mut matcher);
     }
 
+    /// Returns the filtered agent session indices.
+    pub fn agent_display_indices(&self) -> &[usize] {
+        &self.agent_filtered
+    }
+
+    /// Returns the display count for AgentList, including the "+ New conversation" row.
+    pub fn agent_display_count(&self) -> usize {
+        1 + self.agent_filtered.len()
+    }
+
+    /// Rebuild filtered agent session indices from the current query.
+    pub fn agent_rebuild_filtered(&mut self) {
+        if self.query_lc.is_empty() {
+            self.agent_filtered = (0..self.agent_sessions.len()).collect();
+            return;
+        }
+
+        let query = self.query_lc.clone();
+        self.agent_filtered = self
+            .agent_sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, session)| {
+                let title_lc = session.title.to_lowercase();
+                if title_lc.contains(&query) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    /// Load sessions from disk and rebuild filtered indices using the current query.
+    pub fn agent_refresh_sessions(&mut self) {
+        self.agent_sessions = crate::agent::session::list_sessions();
+        self.agent_rebuild_filtered();
+    }
+
     /// Gets the frontmost application to focus later.
     pub fn capture_frontmost(&mut self) {
         use objc2_app_kit::NSWorkspace;
 
         let ws = NSWorkspace::sharedWorkspace();
         self.frontmost = ws.frontmostApplication();
+        if let Some(app) = self.frontmost.as_ref() {
+            let pid = app.processIdentifier();
+            let name = app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            coco_log!("capture_frontmost pid={} name={}", pid, name);
+        } else {
+            coco_log!("capture_frontmost none");
+        }
     }
 
     /// Restores the frontmost application.
     #[allow(deprecated)]
-    pub fn restore_frontmost(&mut self) {
+    pub fn restore_frontmost(&mut self) -> Option<i32> {
         use objc2_app_kit::NSApplicationActivationOptions;
 
         if let Some(app) = self.frontmost.take() {
+            let pid = app.processIdentifier();
+            let name = app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            coco_log!("restore_frontmost pid={} name={}", pid, name);
             app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+            Some(pid)
+        } else {
+            coco_log!("restore_frontmost skipped (none)");
+            None
         }
     }
 }
@@ -552,19 +646,6 @@ fn handle_hotkeys() -> impl futures::Stream<Item = Message> {
                 output.try_send(Message::KeyPressed(event.id)).unwrap();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-}
-
-/// Poll for double-tap Option key events from the native macOS monitor.
-fn handle_double_tap_option() -> impl futures::Stream<Item = Message> {
-    use crate::platform::poll_double_tap_option;
-    stream::channel(10, async |mut output| {
-        loop {
-            if poll_double_tap_option() {
-                output.send(Message::ToggleAgentMode).await.ok();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
 }
