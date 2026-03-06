@@ -7,7 +7,7 @@ use std::ops::Bound;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
-use pinyin::ToPinyin;
+use pinyin::{ToPinyin, ToPinyinMulti};
 
 use crate::app::apps::App;
 
@@ -15,13 +15,13 @@ use crate::app::apps::App;
 #[derive(Clone, Debug)]
 pub struct SearchMeta {
     pub name_lc: String,
-    pub pinyin_full: String,
-    pub pinyin_initials: String,
+    pub pinyin_full_variants: Vec<String>,
+    pub pinyin_initials_variants: Vec<String>,
     pub has_cjk: bool,
     // 本地化名称（如中文名）的搜索元数据
     pub loc_name_lc: Option<String>,
-    pub loc_pinyin_full: Option<String>,
-    pub loc_pinyin_initials: Option<String>,
+    pub loc_pinyin_full_variants: Vec<String>,
+    pub loc_pinyin_initials_variants: Vec<String>,
 }
 
 /// 带搜索元数据的 App
@@ -59,21 +59,74 @@ fn is_cjk_char(c: char) -> bool {
     )
 }
 
-/// 为一个字符串计算拼音全拼和首字母
-fn compute_pinyin(s: &str) -> (String, String) {
-    let mut full = String::new();
-    let mut initials = String::new();
-    for c in s.chars() {
-        if let Some(py) = c.to_pinyin() {
-            full.push_str(py.plain());
-            initials.push_str(&py.plain()[..1]);
-        } else {
-            let lc = c.to_lowercase().to_string();
-            full.push_str(&lc);
-            initials.push_str(&lc);
+const MAX_PINYIN_VARIANTS: usize = 16;
+
+fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
+}
+
+fn pinyin_options(c: char) -> Vec<String> {
+    if let Some(multi) = c.to_pinyin_multi() {
+        return dedupe_preserve_order(
+            multi
+                .into_iter()
+                .map(|py| py.plain().to_string())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    if let Some(py) = c.to_pinyin() {
+        return vec![py.plain().to_string()];
+    }
+
+    vec![c.to_lowercase().to_string()]
+}
+
+fn append_variants(prefixes: &[String], suffixes: &[String]) -> Vec<String> {
+    let mut combined = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    'outer: for prefix in prefixes {
+        for suffix in suffixes {
+            let mut candidate = String::with_capacity(prefix.len() + suffix.len());
+            candidate.push_str(prefix);
+            candidate.push_str(suffix);
+            if seen.insert(candidate.clone()) {
+                combined.push(candidate);
+                if combined.len() >= MAX_PINYIN_VARIANTS {
+                    break 'outer;
+                }
+            }
         }
     }
-    (full, initials)
+
+    combined
+}
+
+/// 为一个字符串计算拼音全拼和首字母的所有合理变体。
+fn compute_pinyin_variants(s: &str) -> (Vec<String>, Vec<String>) {
+    let mut full_variants = vec![String::new()];
+    let mut initials_variants = vec![String::new()];
+
+    for c in s.chars() {
+        let full_options = pinyin_options(c);
+        let initial_options = full_options
+            .iter()
+            .filter_map(|option| option.chars().next().map(|ch| ch.to_string()))
+            .collect::<Vec<_>>();
+
+        full_variants = append_variants(&full_variants, &full_options);
+        initials_variants = append_variants(&initials_variants, &initial_options);
+    }
+
+    (
+        dedupe_preserve_order(full_variants),
+        dedupe_preserve_order(initials_variants),
+    )
 }
 
 /// 为一个 App 构建搜索元数据
@@ -81,35 +134,35 @@ pub fn build_search_meta(name: &str, localized_name: Option<&str>) -> SearchMeta
     let name_lc = name.to_lowercase();
     let has_cjk = name.chars().any(is_cjk_char);
 
-    let (pinyin_full, pinyin_initials) = if has_cjk {
-        compute_pinyin(name)
+    let (pinyin_full_variants, pinyin_initials_variants) = if has_cjk {
+        compute_pinyin_variants(name)
     } else {
-        (String::new(), String::new())
+        (Vec::new(), Vec::new())
     };
 
     // 本地化名称的搜索元数据
-    let (loc_name_lc, loc_pinyin_full, loc_pinyin_initials) = if let Some(ln) = localized_name {
-        let ln_lc = ln.to_lowercase();
-        let ln_has_cjk = ln.chars().any(is_cjk_char);
-        let (lpf, lpi) = if ln_has_cjk {
-            let (f, i) = compute_pinyin(ln);
-            (Some(f), Some(i))
+    let (loc_name_lc, loc_pinyin_full_variants, loc_pinyin_initials_variants) =
+        if let Some(ln) = localized_name {
+            let ln_lc = ln.to_lowercase();
+            let ln_has_cjk = ln.chars().any(is_cjk_char);
+            if ln_has_cjk {
+                let (full_variants, initials_variants) = compute_pinyin_variants(ln);
+                (Some(ln_lc), full_variants, initials_variants)
+            } else {
+                (Some(ln_lc), Vec::new(), Vec::new())
+            }
         } else {
-            (None, None)
+            (None, Vec::new(), Vec::new())
         };
-        (Some(ln_lc), lpf, lpi)
-    } else {
-        (None, None, None)
-    };
 
     SearchMeta {
         name_lc,
-        pinyin_full,
-        pinyin_initials,
+        pinyin_full_variants,
+        pinyin_initials_variants,
         has_cjk,
         loc_name_lc,
-        loc_pinyin_full,
-        loc_pinyin_initials,
+        loc_pinyin_full_variants,
+        loc_pinyin_initials_variants,
     }
 }
 
@@ -141,15 +194,13 @@ impl AppIndex {
                 by_name.entry(meta.name_lc.clone()).or_default().push(i);
             }
 
-            if meta.has_cjk && !meta.pinyin_full.is_empty() {
-                by_pinyin
-                    .entry(meta.pinyin_full.clone())
-                    .or_default()
-                    .push(i);
-                by_initials
-                    .entry(meta.pinyin_initials.clone())
-                    .or_default()
-                    .push(i);
+            if meta.has_cjk {
+                for variant in &meta.pinyin_full_variants {
+                    by_pinyin.entry(variant.clone()).or_default().push(i);
+                }
+                for variant in &meta.pinyin_initials_variants {
+                    by_initials.entry(variant.clone()).or_default().push(i);
+                }
             }
 
             // 索引本地化名称
@@ -158,11 +209,11 @@ impl AppIndex {
                     by_name.entry(ln_lc.clone()).or_default().push(i);
                 }
             }
-            if let Some(ref lpf) = meta.loc_pinyin_full {
-                by_pinyin.entry(lpf.clone()).or_default().push(i);
+            for variant in &meta.loc_pinyin_full_variants {
+                by_pinyin.entry(variant.clone()).or_default().push(i);
             }
-            if let Some(ref lpi) = meta.loc_pinyin_initials {
-                by_initials.entry(lpi.clone()).or_default().push(i);
+            for variant in &meta.loc_pinyin_initials_variants {
+                by_initials.entry(variant.clone()).or_default().push(i);
             }
 
             apps.push(IndexedApp { app, meta });
@@ -254,24 +305,23 @@ impl AppIndex {
                     continue;
                 }
 
-                // 对原名、拼音全拼、本地化名及其拼音都尝试模糊匹配
-                let mut candidates = vec![&ia.meta.name_lc];
-                if ia.meta.has_cjk && !ia.meta.pinyin_full.is_empty() {
-                    candidates.push(&ia.meta.pinyin_full);
-                }
-                if let Some(ref ln) = ia.meta.loc_name_lc {
-                    candidates.push(ln);
-                }
-                if let Some(ref lpf) = ia.meta.loc_pinyin_full {
-                    candidates.push(lpf);
-                }
-
                 let mut best_score: Option<u32> = None;
-                for candidate in candidates {
+                let mut score_candidate = |candidate: &str| {
                     let haystack = Utf32Str::new(candidate, &mut buf);
                     if let Some(s) = pattern.score(haystack, matcher) {
                         best_score = Some(best_score.map_or(s, |prev: u32| prev.max(s)));
                     }
+                };
+
+                score_candidate(&ia.meta.name_lc);
+                for candidate in &ia.meta.pinyin_full_variants {
+                    score_candidate(candidate);
+                }
+                if let Some(ref ln) = ia.meta.loc_name_lc {
+                    score_candidate(ln);
+                }
+                for candidate in &ia.meta.loc_pinyin_full_variants {
+                    score_candidate(candidate);
                 }
 
                 if let Some(s) = best_score {
@@ -663,6 +713,44 @@ mod tests {
         assert!(
             names.contains(&"腾讯会议".to_string()),
             "会议 should find 腾讯会议, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn natural_pinyin_yinyue_finds_music_apps() {
+        let apps = vec![
+            make_localized_app("NeteaseMusic", "网易云音乐"),
+            make_localized_app("QQMusic", "QQ音乐"),
+            make_app("Safari"),
+        ];
+        let index = AppIndex::from_apps(apps);
+        let names = search_names(&index, "yinyue");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "yinyue should find 网易云音乐, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "yinyue should find QQ音乐, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn natural_pinyin_yinle_still_finds_music_apps() {
+        let apps = vec![
+            make_localized_app("NeteaseMusic", "网易云音乐"),
+            make_localized_app("QQMusic", "QQ音乐"),
+            make_app("Safari"),
+        ];
+        let index = AppIndex::from_apps(apps);
+        let names = search_names(&index, "yinle");
+        assert!(
+            names.contains(&"网易云音乐".to_string()),
+            "yinle should find 网易云音乐, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"QQ音乐".to_string()),
+            "yinle should find QQ音乐, got: {names:?}"
         );
     }
 

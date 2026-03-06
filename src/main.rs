@@ -6,6 +6,7 @@ mod clipboard_store;
 mod commands;
 mod config;
 mod currency_conversion;
+mod favorite_store;
 mod history;
 mod icons;
 mod platform;

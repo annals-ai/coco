@@ -55,6 +55,8 @@ pub const SEPARATOR_HEIGHT: f64 = 1.0;
 pub const FOOTER_HEIGHT: f64 = 38.0;
 /// Height of the main-page empty search state ("No results" hint)
 pub const MAIN_EMPTY_STATE_HEIGHT: f64 = 84.0;
+/// Extra bottom breathing room for populated main search results.
+pub const MAIN_SEARCH_RESULTS_BOTTOM_SPACING: f64 = 12.0;
 /// Clipboard page content height (normal dual-pane mode)
 pub const CLIPBOARD_CONTENT_HEIGHT: f64 = 360.0;
 
@@ -66,6 +68,7 @@ pub const COCO_DESC_NAME: &str = "Utility";
 pub enum Page {
     Main,
     ClipboardHistory,
+    ClipboardFavorites,
     EmojiSearch,
     AgentList,
     WindowSwitcher,
@@ -139,6 +142,12 @@ pub enum Message {
     ApplyCalculatorInput(String),
     ClipboardTogglePinFocused,
     ClipboardDeleteFocused,
+    // Clipboard favorites
+    ClipboardFavoriteAdd,
+    ClipboardFavoriteDeleteFocused,
+    ClipboardFavoriteStartEdit,
+    ClipboardFavoriteCommitEdit,
+    ClipboardFavoriteCancelEdit,
     HoverResult(u32),
     FocusWindow(i32, u32),
     // Native show/hide animation completions (macOS)

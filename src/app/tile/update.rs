@@ -46,6 +46,38 @@ use crate::{app::ArrowKey, platform::focus_this_app};
 use crate::{app::COCO_DESC_NAME, platform::get_installed_apps};
 use crate::{app::Move, platform::HapticPattern};
 
+fn command_transfers_focus(command: &Function) -> bool {
+    matches!(
+        command,
+        Function::OpenApp(_)
+            | Function::ActivateApp(_)
+            | Function::OpenTerminal
+            | Function::OpenPrefPane
+            | Function::GoogleSearch(_)
+            | Function::ShowInFinder(_)
+            | Function::OpenWebsite(_)
+    )
+}
+
+fn suppress_frontmost_restore(tile: &mut Tile, reason: &str) {
+    if let Some(app) = tile.frontmost.as_ref() {
+        let pid = app.processIdentifier();
+        let name = app
+            .localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        coco_log!(
+            "suppress_frontmost_restore: reason={} pid={} name={}",
+            reason,
+            pid,
+            name
+        );
+    } else {
+        coco_log!("suppress_frontmost_restore: reason={} none", reason);
+    }
+    tile.frontmost = None;
+}
+
 pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
     match message {
         Message::OpenWindow(opt_id) => {
@@ -165,6 +197,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
+            // Favorites: cancel editing first
+            if tile.editing_favorite_title.is_some() {
+                return Task::done(Message::ClipboardFavoriteCancelEdit);
+            }
+
             if tile.page == Page::ClipboardHistory && tile.clipboard_quick_preview_open {
                 close_clipboard_preview(tile);
                 return Task::none();
@@ -199,6 +236,28 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     } else {
                         0.0
                     };
+                    let resize = tile.snap_resize(blur_height(banner_h, content_h));
+                    return Task::batch([resize, Task::done(Message::ClearSearchQuery)]);
+                }
+            }
+
+            // ClipboardFavorites: ESC clears search first, then goes to ClipboardHistory
+            if tile.page == Page::ClipboardFavorites {
+                if !tile.query_lc.is_empty() {
+                    tile.query.clear();
+                    tile.query_lc.clear();
+                    tile.focus_id = 0;
+                    tile.favorite_rebuild_filtered();
+                    let banner_h = permission_banner_height(tile);
+                    let content_h = favorite_content_height(tile);
+                    return tile.snap_resize(blur_height(banner_h, content_h));
+                } else {
+                    // Go back to clipboard history
+                    tile.page = Page::ClipboardHistory;
+                    tile.focus_id = 0;
+                    tile.clipboard_rebuild_filtered();
+                    let banner_h = permission_banner_height(tile);
+                    let content_h = clipboard_content_height(tile);
                     let resize = tile.snap_resize(blur_height(banner_h, content_h));
                     return Task::batch([resize, Task::done(Message::ClearSearchQuery)]);
                 }
@@ -261,6 +320,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
             let len = match tile.page {
                 Page::ClipboardHistory => tile.clipboard_display_count() as u32,
+                Page::ClipboardFavorites => tile.favorite_display_count() as u32,
                 Page::EmojiSearch => tile.results.len() as u32,
                 Page::AgentList => tile.agent_display_count() as u32,
                 Page::WindowSwitcher => tile.window_list.len() as u32,
@@ -315,9 +375,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                         tile.focus_id as f32 * quantity
                     }
                 }
-                Page::ClipboardHistory => {
+                Page::ClipboardHistory | Page::ClipboardFavorites => {
                     let row_h = 32.0_f32;
-                    let viewport_h = clipboard_content_height(tile) as f32;
+                    let viewport_h = if tile.page == Page::ClipboardHistory {
+                        clipboard_content_height(tile) as f32
+                    } else {
+                        favorite_content_height(tile) as f32
+                    };
                     let total_h = len as f32 * row_h;
                     scroll_offset_with_mid_threshold(
                         tile.focus_id,
@@ -404,7 +468,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::ResultPointerMoved(x) => {
-            if tile.page == Page::ClipboardHistory {
+            if tile.clipboard_quick_preview_open {
+                // Native preview panel is open; suppress all hover changes.
+                tile.suppress_row_hover_focus = true;
+            } else if tile.page == Page::ClipboardHistory || tile.page == Page::ClipboardFavorites {
                 let list_boundary_x = crate::app::WINDOW_WIDTH * 0.40;
                 tile.suppress_row_hover_focus = x > list_boundary_x;
             } else {
@@ -414,17 +481,20 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::ResultPointerExited => {
-            tile.suppress_row_hover_focus = false;
+            if !tile.clipboard_quick_preview_open {
+                tile.suppress_row_hover_focus = false;
+            }
             Task::none()
         }
 
         Message::HoverResult(id) => {
-            if tile.suppress_row_hover_focus {
+            if tile.suppress_row_hover_focus || tile.clipboard_quick_preview_open {
                 return Task::none();
             }
 
             let len = match tile.page {
                 Page::ClipboardHistory => tile.clipboard_display_count() as u32,
+                Page::ClipboardFavorites => tile.favorite_display_count() as u32,
                 Page::AgentList => tile.agent_display_count() as u32,
                 Page::WindowSwitcher => tile.window_list.len() as u32,
                 _ => tile.results.len() as u32,
@@ -447,7 +517,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::ClipboardOpenAt(display_idx) => open_clipboard_entry(tile, display_idx),
+        Message::ClipboardOpenAt(display_idx) => {
+            if tile.page == Page::ClipboardFavorites {
+                open_favorite_entry(tile, display_idx)
+            } else {
+                open_clipboard_entry(tile, display_idx)
+            }
+        }
 
         Message::ClipboardFinalizePaste => {
             coco_log!("ClipboardFinalizePaste: restore frontmost + paste");
@@ -495,6 +571,14 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
             if tile.page == Page::ClipboardHistory {
                 return open_clipboard_entry(tile, tile.focus_id);
+            }
+
+            if tile.page == Page::ClipboardFavorites {
+                // If editing title, commit the edit
+                if tile.editing_favorite_title.is_some() {
+                    return Task::done(Message::ClipboardFavoriteCommitEdit);
+                }
+                return open_favorite_entry(tile, tile.focus_id);
             }
 
             if tile.page == Page::WindowSwitcher {
@@ -577,6 +661,21 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             if !tile.visible || tile.show_actions {
                 return Task::none();
             }
+
+            // Shift+Tab in clipboard modes: toggle between History and Favorites
+            if reverse && matches!(tile.page, Page::ClipboardHistory | Page::ClipboardFavorites) {
+                let target = match tile.page {
+                    Page::ClipboardHistory => Page::ClipboardFavorites,
+                    Page::ClipboardFavorites => Page::ClipboardHistory,
+                    _ => unreachable!(),
+                };
+                close_clipboard_preview(tile);
+                cancel_favorite_editing(tile);
+                tile.page = target;
+                tile.focus_id = 0;
+                return apply_current_query_for_active_mode(tile);
+            }
+
             let Some(current) = launcher_mode_from_page(&tile.page) else {
                 return Task::none();
             };
@@ -594,6 +693,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 tile.actions.clear();
             }
             close_clipboard_preview(tile);
+            cancel_favorite_editing(tile);
             tile.page = target_page;
             tile.focus_id = 0;
             // Keep lowercase query in sync when switching modes so APP mode
@@ -716,12 +816,18 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
         Message::SwitchToPage(page) => {
             close_clipboard_preview(tile);
+            cancel_favorite_editing(tile);
             tile.page = page.clone();
             let banner_h = permission_banner_height(tile);
             let resize = match &tile.page {
                 Page::ClipboardHistory => {
                     tile.clipboard_rebuild_filtered();
                     let content_h = clipboard_content_height(tile);
+                    tile.snap_resize(blur_height(banner_h, content_h))
+                }
+                Page::ClipboardFavorites => {
+                    tile.favorite_rebuild_filtered();
+                    let content_h = favorite_content_height(tile);
                     tile.snap_resize(blur_height(banner_h, content_h))
                 }
                 Page::AgentList => {
@@ -754,16 +860,17 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 return handle_calculator_enter(tile, expr);
             }
 
+            let transfers_focus = command_transfers_focus(&command);
+            if transfers_focus {
+                suppress_frontmost_restore(tile, "run function transfers focus");
+            }
+
             command.execute(&tile.config, &tile.query);
 
-            let return_focus_task = match &command {
-                Function::OpenApp(_)
-                | Function::ActivateApp(_)
-                | Function::OpenTerminal
-                | Function::OpenPrefPane
-                | Function::GoogleSearch(_)
-                | Function::ShowInFinder(_) => Task::none(),
-                _ => Task::done(Message::ReturnFocus),
+            let return_focus_task = if transfers_focus {
+                Task::none()
+            } else {
+                Task::done(Message::ReturnFocus)
             };
 
             if tile.config.buffer_rules.clear_on_enter {
@@ -822,6 +929,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             tile.show_animating = false;
             tile.hide_animating = true;
             close_clipboard_preview(tile);
+            cancel_favorite_editing(tile);
             tile.pending_window_height = None;
             tile.window_resize_token = tile.window_resize_token.wrapping_add(1);
             // Always reset to Main so next open starts fresh
@@ -1089,6 +1197,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             });
 
             // Hide the launcher
+            suppress_frontmost_restore(tile, "open agent session window");
             let hide = if let Some(main_wid) = tile.main_window_id {
                 Task::done(Message::HideWindow(main_wid))
             } else {
@@ -1118,6 +1227,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             });
 
             // Hide the launcher
+            suppress_frontmost_restore(tile, "open new agent window");
             let hide = if let Some(main_wid) = tile.main_window_id {
                 Task::done(Message::HideWindow(main_wid))
             } else {
@@ -1266,6 +1376,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::FocusWindow(pid, window_id) => {
+            suppress_frontmost_restore(tile, "focus external window");
             platform::focus_window(pid, window_id);
             if let Some(wid) = tile.main_window_id {
                 Task::done(Message::HideWindow(wid)).chain(Task::done(Message::ClearSearchQuery))
@@ -1297,8 +1408,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         }
 
         Message::ClipboardDeleteFocused => {
-            if tile.page != Page::ClipboardHistory {
+            if tile.page != Page::ClipboardHistory && tile.page != Page::ClipboardFavorites {
                 return Task::none();
+            }
+
+            // If on favorites page, redirect to favorite delete
+            if tile.page == Page::ClipboardFavorites {
+                return Task::done(Message::ClipboardFavoriteDeleteFocused);
             }
             let indices = tile.clipboard_display_indices();
             if let Some(&entry_idx) = indices.get(tile.focus_id as usize) {
@@ -1333,7 +1449,108 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        Message::ClipboardFavoriteAdd => {
+            if tile.page != Page::ClipboardHistory {
+                return Task::none();
+            }
+            let indices = tile.clipboard_display_indices();
+            if let Some(&entry_idx) = indices.get(tile.focus_id as usize) {
+                if let Some(entry) = tile.clipboard_store.get(entry_idx) {
+                    let title = entry.preview_title.clone();
+                    let content = entry.content.clone();
+                    tile.favorite_store.add(content, title);
+                    tile.favorite_rebuild_filtered();
+                    perform_haptic(HapticPattern::Alignment);
+                }
+            }
+            Task::none()
+        }
+
+        Message::ClipboardFavoriteDeleteFocused => {
+            if tile.page != Page::ClipboardFavorites {
+                return Task::none();
+            }
+            cancel_favorite_editing(tile);
+            let indices = tile.favorite_display_indices();
+            if let Some(&entry_idx) = indices.get(tile.focus_id as usize) {
+                if let Some(entry) = tile.favorite_store.get(entry_idx) {
+                    let id = entry.id;
+                    tile.favorite_store.delete(id);
+                    tile.favorite_rebuild_filtered();
+                    let count = tile.favorite_display_count();
+                    if count == 0 {
+                        tile.focus_id = 0;
+                    } else if tile.focus_id as usize >= count {
+                        tile.focus_id = (count - 1) as u32;
+                    }
+                    let banner_h = permission_banner_height(tile);
+                    let content_h = favorite_content_height(tile);
+                    return tile.snap_resize(blur_height(banner_h, content_h));
+                }
+            }
+            Task::none()
+        }
+
+        Message::ClipboardFavoriteStartEdit => {
+            if tile.page != Page::ClipboardFavorites {
+                return Task::none();
+            }
+            let indices = tile.favorite_display_indices();
+            if let Some(&entry_idx) = indices.get(tile.focus_id as usize) {
+                if let Some(entry) = tile.favorite_store.get(entry_idx) {
+                    let fav_id = entry.id;
+                    let saved_query = tile.query.clone();
+                    tile.editing_favorite_title = Some((fav_id, saved_query));
+                    tile.query = entry.title.clone();
+                    tile.query_lc = entry.title.to_lowercase();
+                }
+            }
+            operation::focus("query")
+        }
+
+        Message::ClipboardFavoriteCommitEdit => {
+            if let Some((fav_id, saved_query)) = tile.editing_favorite_title.take() {
+                let new_title = tile.query.trim().to_string();
+                if !new_title.is_empty() {
+                    tile.favorite_store.rename(fav_id, new_title);
+                }
+                tile.query = saved_query;
+                tile.query_lc = tile.query.trim().to_lowercase();
+                tile.favorite_rebuild_filtered();
+            }
+            Task::none()
+        }
+
+        Message::ClipboardFavoriteCancelEdit => {
+            if let Some((_fav_id, saved_query)) = tile.editing_favorite_title.take() {
+                tile.query = saved_query;
+                tile.query_lc = tile.query.trim().to_lowercase();
+                tile.favorite_rebuild_filtered();
+            }
+            Task::none()
+        }
+
         Message::SearchQueryChanged(input, _id) => {
+            // Swallow spurious character insertion from ⌘+key shortcuts.
+            // iced's text_input may insert the raw character alongside the shortcut message.
+            if crate::app::tile::CMD_SHORTCUT_SWALLOW
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                return Task::none();
+            }
+
+            // When editing a favorite title, just update query without search
+            if tile.page == Page::ClipboardFavorites && tile.editing_favorite_title.is_some() {
+                tile.query = input.clone();
+                tile.query_lc = input.trim().to_lowercase();
+                return Task::none();
+            }
+
+            // ClipboardFavorites: swallow space append (same as clipboard history)
+            if tile.page == Page::ClipboardFavorites && input == format!("{} ", tile.query) {
+                return Task::none();
+            }
+
             // ClipboardHistory reserves Space for native preview panel toggle.
             // `text_input` may still emit an on_input update containing the
             // appended space, so swallow that single-space append here.
@@ -1392,6 +1609,15 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 tile.clipboard_rebuild_filtered();
                 let banner_h = permission_banner_height(tile);
                 let content_h = clipboard_content_height(tile);
+                return tile.snap_resize(blur_height(banner_h, content_h));
+            }
+
+            // ClipboardFavorites page: filter in-place
+            if tile.page == Page::ClipboardFavorites {
+                tile.focus_id = 0;
+                tile.favorite_rebuild_filtered();
+                let banner_h = permission_banner_height(tile);
+                let content_h = favorite_content_height(tile);
                 return tile.snap_resize(blur_height(banner_h, content_h));
             }
 
@@ -1648,7 +1874,9 @@ pub fn zero_query_scrollable_height(results: &[App]) -> f64 {
 /// Calculate the scrollable content height for the search-results list
 /// when the "APPS" section header is shown.
 pub fn search_results_scrollable_height(results: &[App]) -> f64 {
-    use crate::app::{ROW_HEIGHT, ZQ_COL_PADDING_V, ZQ_HEADER_HEIGHT};
+    use crate::app::{
+        MAIN_SEARCH_RESULTS_BOTTOM_SPACING, ROW_HEIGHT, ZQ_COL_PADDING_V, ZQ_HEADER_HEIGHT,
+    };
     if results.is_empty() {
         return 0.0;
     }
@@ -1657,7 +1885,10 @@ pub fn search_results_scrollable_height(results: &[App]) -> f64 {
     } else {
         0.0
     };
-    ZQ_COL_PADDING_V + header_h + (results.len() as f64 * ROW_HEIGHT)
+    ZQ_COL_PADDING_V
+        + header_h
+        + (results.len() as f64 * ROW_HEIGHT)
+        + MAIN_SEARCH_RESULTS_BOTTOM_SPACING
 }
 
 /// Y-offset (inside the zero-query scroll content) of the focused result row.
@@ -1718,7 +1949,7 @@ fn search_results_has_header(results: &[App]) -> bool {
 fn launcher_mode_from_page(page: &Page) -> Option<LauncherMode> {
     match page {
         Page::Main => Some(LauncherMode::App),
-        Page::ClipboardHistory => Some(LauncherMode::Clipboard),
+        Page::ClipboardHistory | Page::ClipboardFavorites => Some(LauncherMode::Clipboard),
         Page::AgentList => None,
         _ => None,
     }
@@ -1903,12 +2134,153 @@ fn close_clipboard_preview(tile: &mut Tile) {
     platform::hide_clipboard_preview_panel();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{command_transfers_focus, search_results_scrollable_height};
+    use crate::app::MAIN_SEARCH_RESULTS_BOTTOM_SPACING;
+    use crate::app::apps::{App, AppCommand};
+    use crate::commands::Function;
+
+    fn make_app(name: &str) -> App {
+        App {
+            name: name.to_string(),
+            name_lc: name.to_lowercase(),
+            localized_name: None,
+            desc: String::new(),
+            icons: None,
+            open_command: AppCommand::Display,
+            category: None,
+            bundle_path: None,
+            bundle_id: None,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn focus_transferring_commands_are_marked() {
+        assert!(command_transfers_focus(&Function::OpenApp(
+            "/Applications/Safari.app".into()
+        )));
+        assert!(command_transfers_focus(&Function::ActivateApp(42)));
+        assert!(command_transfers_focus(&Function::OpenTerminal));
+        assert!(command_transfers_focus(&Function::OpenPrefPane));
+        assert!(command_transfers_focus(&Function::GoogleSearch(
+            "coco".into()
+        )));
+        assert!(command_transfers_focus(&Function::ShowInFinder(
+            "/tmp".into()
+        )));
+        assert!(command_transfers_focus(&Function::OpenWebsite(
+            "example.com".into()
+        )));
+    }
+
+    #[test]
+    fn in_place_commands_keep_frontmost_restore() {
+        assert!(!command_transfers_focus(&Function::CopyPath("/tmp".into())));
+        assert!(!command_transfers_focus(&Function::CopyBundleId(
+            "com.example.app".into()
+        )));
+        assert!(!command_transfers_focus(&Function::HideApp(7)));
+        assert!(!command_transfers_focus(&Function::QuitApp(7)));
+        assert!(!command_transfers_focus(&Function::ForceQuitApp(7)));
+        assert!(!command_transfers_focus(&Function::CopyToClipboard(
+            crate::clipboard::ClipBoardContentType::Text("hi".into())
+        )));
+    }
+
+    #[test]
+    fn search_results_height_includes_bottom_spacing() {
+        use crate::app::{ROW_HEIGHT, ZQ_COL_PADDING_V, ZQ_HEADER_HEIGHT};
+
+        let results = vec![make_app("Codex"), make_app("Xcode")];
+        let expected = ZQ_COL_PADDING_V
+            + ZQ_HEADER_HEIGHT
+            + (results.len() as f64 * ROW_HEIGHT)
+            + MAIN_SEARCH_RESULTS_BOTTOM_SPACING;
+
+        assert_eq!(search_results_scrollable_height(&results), expected);
+    }
+}
+
+/// Cancel any in-progress favorite title edit, restoring the saved query.
+fn cancel_favorite_editing(tile: &mut Tile) {
+    if let Some((_fav_id, saved_query)) = tile.editing_favorite_title.take() {
+        tile.query = saved_query;
+        tile.query_lc = tile.query.trim().to_lowercase();
+    }
+}
+
 fn clipboard_content_height(tile: &Tile) -> f64 {
     if tile.clipboard_display_count() == 0 {
         0.0
     } else {
         crate::app::CLIPBOARD_CONTENT_HEIGHT
     }
+}
+
+fn favorite_content_height(tile: &Tile) -> f64 {
+    if tile.favorite_display_count() == 0 {
+        0.0
+    } else {
+        crate::app::CLIPBOARD_CONTENT_HEIGHT
+    }
+}
+
+fn open_favorite_entry(tile: &mut Tile, display_idx: u32) -> Task<Message> {
+    cancel_favorite_editing(tile);
+    let indices = tile.favorite_display_indices();
+    if let Some(&entry_idx) = indices.get(display_idx as usize)
+        && let Some(entry) = tile.favorite_store.get(entry_idx)
+    {
+        tile.focus_id = display_idx;
+        match &entry.content {
+            ClipBoardContentType::Text(text) => {
+                arboard::Clipboard::new()
+                    .unwrap()
+                    .set_text(text.clone())
+                    .ok();
+            }
+            ClipBoardContentType::Image(img) => {
+                arboard::Clipboard::new()
+                    .unwrap()
+                    .set_image(img.to_owned_img())
+                    .ok();
+            }
+        }
+        close_clipboard_preview(tile);
+        tile.pending_paste_after_hide = false;
+        tile.visible = false;
+        tile.focused = false;
+        tile.show_animating = false;
+        tile.hide_animating = false;
+        tile.page = Page::Main;
+
+        let hide_task = if let Some(wid) = tile.main_window_id {
+            window::set_mode::<Message>(wid, window::Mode::Hidden)
+        } else {
+            Task::none()
+        };
+        let paste_task = Task::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+            },
+            |_| Message::ClipboardFinalizePaste,
+        );
+
+        return if tile.config.buffer_rules.clear_on_hide {
+            Task::batch([
+                hide_task,
+                paste_task,
+                Task::done(Message::ClearSearchQuery),
+                Task::done(Message::ClearSearchResults),
+            ])
+        } else {
+            Task::batch([hide_task, paste_task])
+        };
+    }
+
+    Task::none()
 }
 
 fn apply_current_query_for_active_mode(tile: &mut Tile) -> Task<Message> {
@@ -1919,6 +2291,12 @@ fn apply_current_query_for_active_mode(tile: &mut Tile) -> Task<Message> {
             tile.focus_id = 0;
             tile.clipboard_rebuild_filtered();
             let content_h = clipboard_content_height(tile);
+            mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+        }
+        Page::ClipboardFavorites => {
+            tile.focus_id = 0;
+            tile.favorite_rebuild_filtered();
+            let content_h = favorite_content_height(tile);
             mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
         }
         Page::AgentList => {

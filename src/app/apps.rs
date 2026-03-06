@@ -191,8 +191,8 @@ impl App {
     ) -> iced::Element<'static, Message> {
         let focused = focussed_id == id_num;
         let is_currency_result = self.name_lc.starts_with("__currency__|");
-        let is_calculator_result = self.name_lc.starts_with("__calc__|")
-            || self.name_lc.starts_with("__calc_history__|");
+        let is_calculator_result =
+            self.name_lc.starts_with("__calc__|") || self.name_lc.starts_with("__calc_history__|");
 
         let is_app_result = matches!(
             &self.open_command,

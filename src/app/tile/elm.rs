@@ -17,6 +17,7 @@ use rayon::slice::ParallelSliceMut;
 
 use crate::agent::types::{AgentStatus, ChatMessage};
 use crate::app::pages::emoji::emoji_page;
+use crate::app::pages::favorites::{favorites_footer, favorites_view};
 use crate::app::tile::AppIndex;
 use crate::config::Theme;
 use crate::platform;
@@ -64,6 +65,8 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
     let options = AppIndex::from_apps(options);
     let clipboard_store = crate::clipboard_store::ClipboardStore::load();
     let clipboard_filtered = (0..clipboard_store.len()).collect();
+    let favorite_store = crate::favorite_store::FavoriteStore::load();
+    let favorite_filtered = (0..favorite_store.len()).collect();
     let agent_sessions = crate::agent::session::list_sessions();
     let agent_filtered = (0..agent_sessions.len()).collect();
 
@@ -122,6 +125,9 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             suppress_row_hover_focus: false,
             pending_paste_after_hide: false,
             calculator_history: Vec::new(),
+            favorite_store,
+            favorite_filtered,
+            editing_favorite_title: None,
         },
         Task::batch([open.map(move |_| Message::OpenWindow(Some(id)))]),
     )
@@ -146,6 +152,7 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         Page::Main => tile.results.is_empty() && !show_main_empty_state,
         Page::EmojiSearch => tile.results.is_empty(),
         Page::ClipboardHistory => tile.clipboard_display_count() == 0,
+        Page::ClipboardFavorites => tile.favorite_display_count() == 0,
         Page::AgentList => false,
         Page::WindowSwitcher => tile.window_list.is_empty(),
     };
@@ -162,7 +169,14 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let mut search_font = theme.font();
     search_font.weight = Weight::Semibold;
 
-    let title_input = text_input(tile.config.placeholder.as_str(), &tile.query)
+    let placeholder =
+        if tile.page == Page::ClipboardFavorites && tile.editing_favorite_title.is_some() {
+            "Edit title… (Enter to save, ESC to cancel)"
+        } else {
+            tile.config.placeholder.as_str()
+        };
+
+    let title_input = text_input(placeholder, &tile.query)
         .on_input(move |a| Message::SearchQueryChanged(a, wid))
         .on_paste(move |a| Message::SearchQueryChanged(a, wid))
         .font(search_font)
@@ -210,6 +224,18 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
             tile.clipboard_display_indices(),
             tile.focus_id,
             theme,
+            &tile.page,
+        )
+    } else if tile.page == Page::ClipboardFavorites {
+        favorites_view(
+            tile.favorite_store.all(),
+            tile.favorite_display_indices(),
+            tile.focus_id,
+            theme,
+            &tile.page,
+            tile.editing_favorite_title
+                .as_ref()
+                .map(|(fav_id, _)| *fav_id),
         )
     } else if tile.page == Page::AgentList {
         crate::app::pages::agent::agent_list_view(
@@ -236,6 +262,7 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let results_count = match &tile.page {
         Page::Main => tile.results.len(),
         Page::ClipboardHistory => tile.clipboard_display_count(),
+        Page::ClipboardFavorites => tile.favorite_display_count(),
         Page::EmojiSearch => tile.results.len(),
         Page::AgentList => tile.agent_display_count(),
         Page::WindowSwitcher => tile.window_list.len(),
@@ -244,6 +271,7 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let has_results = match &tile.page {
         Page::Main | Page::EmojiSearch => !tile.results.is_empty(),
         Page::ClipboardHistory => tile.clipboard_display_count() > 0,
+        Page::ClipboardFavorites => tile.favorite_display_count() > 0,
         Page::AgentList => true,
         Page::WindowSwitcher => !tile.window_list.is_empty(),
     };
@@ -251,7 +279,9 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
     let has_body_content = has_results || show_main_empty_state;
 
     let height = match tile.page {
-        Page::ClipboardHistory => crate::app::CLIPBOARD_CONTENT_HEIGHT as usize,
+        Page::ClipboardHistory | Page::ClipboardFavorites => {
+            crate::app::CLIPBOARD_CONTENT_HEIGHT as usize
+        }
         Page::AgentList => std::cmp::min(tile.agent_display_count() * 52, 364),
         Page::WindowSwitcher => std::cmp::min(tile.window_list.len() * 52, 364),
         _ => {
@@ -310,11 +340,17 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
         column = column.push(actions_footer(theme.clone(), tile.actions.len()));
     } else {
         column = column.push(scrollable);
-        if has_results {
+        if has_results || tile.page == Page::ClipboardFavorites {
             if tile.page == Page::ClipboardHistory {
                 column = column.push(crate::app::pages::clipboard::clipboard_footer(
                     theme,
                     results_count,
+                ));
+            } else if tile.page == Page::ClipboardFavorites {
+                column = column.push(favorites_footer(
+                    theme,
+                    results_count,
+                    tile.editing_favorite_title.is_some(),
                 ));
             } else if tile.page != Page::Main {
                 column = column.push(footer(theme.clone(), results_count));
@@ -352,7 +388,7 @@ pub fn view(tile: &Tile, wid: window::Id) -> Element<'_, Message> {
 fn launcher_mode_for_page(page: &Page) -> Option<LauncherMode> {
     match page {
         Page::Main => Some(LauncherMode::App),
-        Page::ClipboardHistory => Some(LauncherMode::Clipboard),
+        Page::ClipboardHistory | Page::ClipboardFavorites => Some(LauncherMode::Clipboard),
         Page::AgentList => None,
         _ => None,
     }
@@ -1031,12 +1067,9 @@ fn search_results_view<'a>(
     use crate::styles::section_header_style;
 
     let is_calculator_section = !results.is_empty()
-        && results
-            .iter()
-            .all(|app| {
-                app.name_lc.starts_with("__calc__|")
-                    || app.name_lc.starts_with("__calc_history__|")
-            });
+        && results.iter().all(|app| {
+            app.name_lc.starts_with("__calc__|") || app.name_lc.starts_with("__calc_history__|")
+        });
     let is_currency_section = !results.is_empty()
         && results
             .iter()
@@ -1095,6 +1128,8 @@ fn search_results_view<'a>(
     for (i, app) in results.iter().enumerate() {
         col = col.push(app.clone().render(theme.clone(), i as u32, focus_id));
     }
+
+    col = col.push(space().height(crate::app::MAIN_SEARCH_RESULTS_BOTTOM_SPACING as f32));
 
     container(col).into()
 }

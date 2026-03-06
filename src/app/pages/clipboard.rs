@@ -9,7 +9,8 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Length};
 use std::path::{Path, PathBuf};
 
-use crate::app::{Message, WINDOW_WIDTH};
+use crate::app::pages::favorites::clipboard_sub_tabs;
+use crate::app::{Message, Page, WINDOW_WIDTH};
 use crate::clipboard::ClipBoardContentType;
 use crate::clipboard_store::{ClipboardEntry, format_relative_time};
 use crate::config::Theme;
@@ -24,11 +25,14 @@ pub fn clipboard_view(
     indices: &[usize],
     focus_id: u32,
     theme: &Theme,
+    active_page: &Page,
 ) -> Element<'static, Message> {
     const CLIPBOARD_ROW_H: f32 = 32.0;
     const WINDOW_ROWS: usize = 48;
-    const LIST_TOP_GAP: f32 = 10.0;
+    const LIST_TOP_GAP: f32 = 0.0;
+    let sub_tabs_h: f32 = 34.0;
     let viewport_h = crate::app::CLIPBOARD_CONTENT_HEIGHT as f32;
+    let list_viewport_h = viewport_h - sub_tabs_h;
 
     if indices.is_empty() {
         let msg = if entries.is_empty() {
@@ -36,16 +40,23 @@ pub fn clipboard_view(
         } else {
             "No matches"
         };
-        return container(
-            Text::new(msg)
-                .size(14)
-                .color(theme.text_color(0.35))
-                .font(theme.font()),
-        )
-        .width(Length::Fill)
-        .height(120)
-        .center(Length::Fill)
-        .into();
+        let sub_tabs = clipboard_sub_tabs(active_page, theme);
+        return Column::new()
+            .push(sub_tabs)
+            .push(
+                container(
+                    Text::new(msg)
+                        .size(14)
+                        .color(theme.text_color(0.35))
+                        .font(theme.font()),
+                )
+                .width(Length::Fill)
+                .height(list_viewport_h)
+                .center(Length::Fill),
+            )
+            .height(viewport_h)
+            .width(Length::Fill)
+            .into();
     }
 
     let left_width = (WINDOW_WIDTH * 0.40) as f32;
@@ -96,9 +107,16 @@ pub fn clipboard_view(
     )
     .id("results")
     .width(Length::Fill)
-    .height(viewport_h);
+    .height(list_viewport_h);
 
-    let left_pane = container(list_scrollable)
+    let sub_tabs = clipboard_sub_tabs(active_page, theme);
+    let left_content = Column::new()
+        .push(sub_tabs)
+        .push(list_scrollable)
+        .height(viewport_h)
+        .width(Length::Fill);
+
+    let left_pane = container(left_content)
         .width(left_width)
         .height(viewport_h)
         .clip(true);
@@ -338,10 +356,12 @@ pub fn clipboard_footer(theme: &Theme, count: usize) -> Element<'static, Message
 
     let theme_clone = theme.clone();
 
+    let fav_badge = shortcut_badge("\u{2318}S", "Fav", theme);
     let paste_badge = shortcut_badge_icon(crate::icons::ARROW_RETURN_LEFT, "Paste", theme);
     let esc_badge = shortcut_badge("ESC", "Back", theme);
 
     let right = Row::new()
+        .push(fav_badge)
         .push(paste_badge)
         .push(esc_badge)
         .spacing(8)

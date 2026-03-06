@@ -107,27 +107,20 @@ impl ClipboardStore {
         }
     }
 
-    /// Push a new clipboard content. Deduplicates: if same content exists,
-    /// moves it to the front and updates timestamp.
+    /// Push a new clipboard content.
+    /// Deduplicates adjacent entries only: if same as the latest history item,
+    /// refreshes timestamp and skips inserting a new entry.
     pub fn push(&mut self, content: ClipBoardContentType) {
-        // Check for duplicate
-        if let Some(pos) = self
+        // Adjacent-only dedupe: compare with latest non-pinned history entry.
+        let insert_pos = self
             .entries
             .iter()
-            .position(|e| content_eq(&e.content, &content))
+            .position(|e| !e.pinned)
+            .unwrap_or(self.entries.len());
+        if let Some(latest) = self.entries.get_mut(insert_pos)
+            && content_eq(&latest.content, &content)
         {
-            let mut entry = self.entries.remove(pos);
-            entry.created_at = Utc::now();
-            // Re-insert at correct position (after pinned items if not pinned)
-            let insert_pos = if entry.pinned {
-                0
-            } else {
-                self.entries
-                    .iter()
-                    .position(|e| !e.pinned)
-                    .unwrap_or(self.entries.len())
-            };
-            self.entries.insert(insert_pos, entry);
+            latest.created_at = Utc::now();
             self.save();
             return;
         }
@@ -136,12 +129,7 @@ impl ClipboardStore {
         self.next_id += 1;
         let entry = build_entry(id, content, false, Utc::now());
 
-        // Insert after pinned items
-        let insert_pos = self
-            .entries
-            .iter()
-            .position(|e| !e.pinned)
-            .unwrap_or(self.entries.len());
+        // Insert after pinned items (most recent non-pinned first)
         self.entries.insert(insert_pos, entry);
 
         // Trim excess non-pinned entries

@@ -7,6 +7,7 @@ use crate::app::{ArrowKey, Message, Move, Page};
 use crate::clipboard::ClipBoardContentType;
 use crate::clipboard_store::ClipboardStore;
 use crate::config::Config;
+use crate::favorite_store::FavoriteStore;
 use crate::search;
 use crate::utils::open_settings;
 use crate::{app::apps::App, platform::default_app_paths};
@@ -34,7 +35,13 @@ use tray_icon::TrayIcon;
 use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Flag set by keyboard::listen when a ⌘+key shortcut fires.
+/// Checked in SearchQueryChanged to swallow the spurious character
+/// that iced's text_input may insert alongside the shortcut.
+pub static CMD_SHORTCUT_SWALLOW: AtomicBool = AtomicBool::new(false);
 
 macro_rules! coco_log {
     ($($arg:tt)*) => {{
@@ -159,6 +166,11 @@ pub struct Tile {
     pub pending_paste_after_hide: bool,
     /// In-memory calculator history shown in the calculator UI.
     pub calculator_history: Vec<CalculatorHistoryEntry>,
+    // Clipboard favorites
+    pub favorite_store: FavoriteStore,
+    pub favorite_filtered: Vec<usize>,
+    /// (fav_id, saved_query) — editing title state
+    pub editing_favorite_title: Option<(u64, String)>,
 }
 
 impl Tile {
@@ -365,13 +377,31 @@ impl Tile {
             }) => Some(Message::EscKeyPressed(id)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Character(cha),
-                modifiers: Modifiers::LOGO,
+                modifiers,
                 ..
-            }) => {
-                if cha.to_string() == "," {
-                    open_settings();
+            }) if modifiers.command() => {
+                let ch = cha.to_string();
+                let ch_lc = ch.to_lowercase();
+                CMD_SHORTCUT_SWALLOW.store(true, Ordering::Relaxed);
+                if ch_lc == "k" {
+                    Some(Message::ShowActions)
+                } else if ch_lc == "r" {
+                    Some(Message::ReloadConfig)
+                } else if ch_lc == "p" {
+                    Some(Message::ClipboardTogglePinFocused)
+                } else if ch_lc == "d" {
+                    Some(Message::ClipboardDeleteFocused)
+                } else if ch_lc == "s" {
+                    Some(Message::ClipboardFavoriteAdd)
+                } else if ch_lc == "e" {
+                    Some(Message::ClipboardFavoriteStartEdit)
+                } else {
+                    CMD_SHORTCUT_SWALLOW.store(false, Ordering::Relaxed);
+                    if ch == "," {
+                        open_settings();
+                    }
+                    None
                 }
-                None
             }
             _ => None,
         });
@@ -430,20 +460,9 @@ impl Tile {
                                     modifiers.command()
                                 );
                                 return Some(Message::SpacePressed);
-                            } else if modifiers.command() && chr_s.to_lowercase() == "k" {
-                                return Some(Message::ShowActions);
-                            } else if modifiers.command() && chr_s.to_lowercase() == "r" {
-                                return Some(Message::ReloadConfig);
-                            } else if modifiers.command() && chr_s.to_lowercase() == "p" {
-                                return Some(Message::ClipboardTogglePinFocused);
-                            } else if modifiers.command() && chr_s.to_lowercase() == "d" {
-                                return Some(Message::ClipboardDeleteFocused);
-                            } else if modifiers.command() && chr_s == "," {
-                                open_settings();
                             }
+                            // ⌘+key shortcuts are handled in event::listen_with above.
                             // Let iced text_input handle normal character input directly.
-                            // Forwarding raw keyboard characters here can break non-US layouts
-                            // (e.g. `¥` key being interpreted as `$`).
                             return None;
                         }
                         keyboard::Key::Named(Named::Enter) => return Some(Message::OpenFocused),
@@ -483,7 +502,7 @@ impl Tile {
         let options = match self.page {
             Page::Main => &self.options,
             Page::EmojiSearch => &self.emoji_apps,
-            _ => return, // AgentList / ClipboardHistory don't use fuzzy search
+            _ => return, // AgentList / ClipboardHistory / ClipboardFavorites don't use fuzzy search
         };
         let mut matcher = self.fuzzy_matcher.borrow_mut();
         self.results = options.search(&query, &mut matcher);
@@ -537,6 +556,23 @@ impl Tile {
                 }
             })
             .collect();
+    }
+
+    /// Returns the indices of favorite entries to display (filtered or all).
+    pub fn favorite_display_indices(&self) -> &[usize] {
+        &self.favorite_filtered
+    }
+
+    /// Returns the count of displayed favorite entries.
+    pub fn favorite_display_count(&self) -> usize {
+        self.favorite_filtered.len()
+    }
+
+    /// Rebuild the filtered favorite list (all entries if no search query).
+    pub fn favorite_rebuild_filtered(&mut self) {
+        let query = self.query_lc.clone();
+        let mut matcher = self.fuzzy_matcher.borrow_mut();
+        self.favorite_filtered = self.favorite_store.search(&query, &mut matcher);
     }
 
     /// Load sessions from disk and rebuild filtered indices using the current query.
