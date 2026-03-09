@@ -120,6 +120,8 @@ pub enum Message {
     SwitchLauncherMode(LauncherMode),
     CycleLauncherMode { reverse: bool },
     ClipboardHistory(ClipBoardContentType),
+    PrimeVisibleAppIcons,
+    AppIconLoaded(String, Option<iced::widget::image::Handle>),
     ChangeFocus(ArrowKey),
     ResultPointerMoved(f32),
     ResultPointerExited,

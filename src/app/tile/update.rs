@@ -115,7 +115,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 tile.permissions_ok
             );
             // Always refresh zero-query cache on open
-            let zq = build_zero_query_results_inner(&tile.options, tile.config.theme.show_icons);
+            let zq = build_zero_query_results_inner();
             tile.zero_query_cache = zq;
             // Compute target height for content
             let banner_h = permission_banner_height(tile);
@@ -163,7 +163,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
             platform::animate_show();
 
-            Task::batch([tile.snap_resize(target_h), operation::focus("query")])
+            Task::batch([
+                tile.snap_resize(target_h),
+                operation::focus("query"),
+                Task::done(Message::PrimeVisibleAppIcons),
+            ])
         }
         Message::HideTrayIcon => {
             tile.tray_icon = None;
@@ -237,7 +241,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                         0.0
                     };
                     let resize = tile.snap_resize(blur_height(banner_h, content_h));
-                    return Task::batch([resize, Task::done(Message::ClearSearchQuery)]);
+                    return Task::batch([
+                        resize,
+                        Task::done(Message::ClearSearchQuery),
+                        Task::done(Message::PrimeVisibleAppIcons),
+                    ]);
                 }
             }
 
@@ -277,7 +285,11 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                     0.0
                 };
                 let resize = tile.snap_resize(blur_height(banner_h, content_h));
-                return Task::batch([resize, Task::done(Message::ClearSearchQuery)]);
+                return Task::batch([
+                    resize,
+                    Task::done(Message::ClearSearchQuery),
+                    Task::done(Message::PrimeVisibleAppIcons),
+                ]);
             }
 
             if tile.query_lc.is_empty() {
@@ -299,7 +311,10 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 } else {
                     0.0
                 };
-                tile.snap_resize(blur_height(banner_h, content_h))
+                Task::batch([
+                    tile.snap_resize(blur_height(banner_h, content_h)),
+                    Task::done(Message::PrimeVisibleAppIcons),
+                ])
             }
         }
 
@@ -464,6 +479,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                         y: Some(y),
                     },
                 ),
+                Task::done(Message::PrimeVisibleAppIcons),
             ])
         }
 
@@ -477,7 +493,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             } else {
                 tile.suppress_row_hover_focus = false;
             }
-            Task::none()
+            Task::done(Message::PrimeVisibleAppIcons)
         }
 
         Message::ResultPointerExited => {
@@ -722,7 +738,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 Err(_) => return Task::none(),
             };
 
-            let mut new_options = get_installed_apps(new_config.theme.show_icons);
+            let mut new_options = get_installed_apps(false);
             new_options.extend(new_config.shells.iter().map(|x| x.to_app()));
             new_options.extend(App::basic_apps());
             new_options.par_sort_by_key(|x| x.name.len());
@@ -1176,6 +1192,18 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
         Message::ClipboardHistory(content) => {
             tile.clipboard_store.push(content);
             tile.clipboard_rebuild_filtered();
+            Task::none()
+        }
+
+        Message::PrimeVisibleAppIcons => prime_visible_app_icons(tile),
+
+        Message::AppIconLoaded(bundle_path, icon) => {
+            tile.pending_icon_paths.remove(&bundle_path);
+            if let Some(icon) = icon {
+                tile.icon_cache.insert(bundle_path, icon);
+                apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
+                apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
+            }
             Task::none()
         }
 
@@ -1642,7 +1670,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
                 };
                 let resize = tile.snap_resize(blur_height(banner_h, content_h));
                 tile.focus_id = 0;
-                return resize;
+                return Task::batch([resize, Task::done(Message::PrimeVisibleAppIcons)]);
             } else if tile.query_lc == "randomvar" {
                 let rand_num = rand::random_range(0..100);
                 tile.results = vec![App {
@@ -1714,9 +1742,13 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             let resize = tile.snap_resize(blur_height(banner_h, scrollable_h));
 
             if has_results_now {
-                Task::batch([resize, Task::done(Message::ChangeFocus(ArrowKey::Left))])
+                Task::batch([
+                    resize,
+                    Task::done(Message::ChangeFocus(ArrowKey::Left)),
+                    Task::done(Message::PrimeVisibleAppIcons),
+                ])
             } else {
-                resize
+                Task::batch([resize, Task::done(Message::PrimeVisibleAppIcons)])
             }
         }
     }
@@ -1768,24 +1800,15 @@ fn scroll_offset_with_mid_threshold_from_focus_y(
 
 /// Build the zero-query results: running apps + recent apps (from history).
 ///
-/// Icons are resolved from the pre-loaded installed-apps index (cheap lookup)
-/// instead of calling NSWorkspace.iconForFile on the main thread.
-///
-/// Takes the options index and show_icons flag separately to avoid borrowing
-/// all of `Tile` while we need to mutate other fields.
-fn build_zero_query_results_inner(options: &AppIndex, show_icons: bool) -> Vec<App> {
+/// Icons are loaded lazily after the visible rows are known, so this stays
+/// metadata-only and cheap during startup/open-window work.
+fn build_zero_query_results_inner() -> Vec<App> {
     use crate::app::apps::AppCategory;
     use crate::history::{History, format_relative_time};
 
     let mut results = Vec::new();
 
-    // Running apps — fetch list WITHOUT icons (fast), then patch icons from cache.
-    let mut running = platform::get_running_apps(false);
-    for app in &mut running {
-        if show_icons {
-            app.icons = find_icon_in_index(options, app.bundle_path.as_deref());
-        }
-    }
+    let running = platform::get_running_apps(false);
     let running_paths: std::collections::HashSet<String> = running
         .iter()
         .filter_map(|a| a.bundle_path.clone())
@@ -1802,16 +1825,11 @@ fn build_zero_query_results_inner(options: &AppIndex, show_icons: bool) -> Vec<A
         if !std::path::Path::new(&entry.bundle_path).exists() {
             continue;
         }
-        let icon = if show_icons {
-            find_icon_in_index(options, Some(&entry.bundle_path))
-        } else {
-            None
-        };
         let time_str = format!("Last: {}", format_relative_time(&entry.last_used));
         results.push(App {
             open_command: AppCommand::Function(Function::OpenApp(entry.bundle_path.clone())),
             desc: time_str,
-            icons: icon,
+            icons: None,
             name: entry.name.clone(),
             name_lc: String::new(),
             localized_name: None,
@@ -1825,23 +1843,73 @@ fn build_zero_query_results_inner(options: &AppIndex, show_icons: bool) -> Vec<A
     results
 }
 
-/// Look up an icon from the pre-loaded installed-apps index by bundle path.
-/// This avoids calling NSWorkspace.iconForFile on the main thread.
-fn find_icon_in_index(
-    index: &crate::app::tile::AppIndex,
-    bundle_path: Option<&str>,
-) -> Option<iced::widget::image::Handle> {
-    let path = bundle_path?;
-    // The index stores apps whose desc is the bundle path (for installed apps from discovery)
-    // or whose open_command contains the path.
-    for indexed_app in index.all() {
-        if let AppCommand::Function(Function::OpenApp(ref app_path)) = indexed_app.open_command {
-            if app_path == path {
-                return indexed_app.icons.clone();
-            }
+fn prime_visible_app_icons(tile: &mut Tile) -> Task<Message> {
+    if !tile.config.theme.show_icons {
+        return Task::none();
+    }
+
+    apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
+    apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
+
+    let mut tasks = Vec::new();
+    for bundle_path in visible_icon_paths(&tile.results, tile.focus_id as usize) {
+        if tile.icon_cache.contains_key(&bundle_path)
+            || !tile.pending_icon_paths.insert(bundle_path.clone())
+        {
+            continue;
+        }
+
+        let path_for_task = bundle_path.clone();
+        tasks.push(Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::utils::icon_from_app_bundle(Path::new(&path_for_task))
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            move |icon| Message::AppIconLoaded(bundle_path, icon),
+        ));
+    }
+
+    Task::batch(tasks)
+}
+
+fn apply_cached_icons_to_apps(
+    apps: &mut [App],
+    icon_cache: &std::collections::HashMap<String, iced::widget::image::Handle>,
+) {
+    for app in apps {
+        if app.icons.is_some() {
+            continue;
+        }
+        let Some(bundle_path) = icon_key_for_app(app) else {
+            continue;
+        };
+        if let Some(icon) = icon_cache.get(bundle_path) {
+            app.icons = Some(icon.clone());
         }
     }
-    None
+}
+
+fn visible_icon_paths(results: &[App], focus_id: usize) -> Vec<String> {
+    const ICON_PREFETCH_WINDOW: usize = crate::app::MAX_VISIBLE_ROWS + 4;
+
+    let mut seen = std::collections::HashSet::new();
+    let start = focus_id.saturating_sub(ICON_PREFETCH_WINDOW / 2);
+    results
+        .iter()
+        .skip(start)
+        .take(ICON_PREFETCH_WINDOW)
+        .filter_map(icon_key_for_app)
+        .cloned()
+        .filter(|bundle_path| seen.insert(bundle_path.clone()))
+        .collect()
+}
+
+fn icon_key_for_app(app: &App) -> Option<&String> {
+    app.bundle_path.as_ref()
 }
 
 /// Calculate the scrollable content height for zero-query results.
@@ -2126,7 +2194,11 @@ fn handle_calculator_enter(tile: &mut Tile, expr: &Expr) -> Task<Message> {
     };
 
     let resize = tile.snap_resize(blur_height(banner_h, scrollable_h));
-    Task::batch([resize, operation::focus("query")])
+    Task::batch([
+        resize,
+        operation::focus("query"),
+        Task::done(Message::PrimeVisibleAppIcons),
+    ])
 }
 
 fn close_clipboard_preview(tile: &mut Tile) {
@@ -2319,7 +2391,10 @@ fn apply_current_query_for_active_mode(tile: &mut Tile) -> Task<Message> {
                     zero_query_scrollable_height(&tile.results)
                         .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
                 };
-                mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+                Task::batch([
+                    mode_switch_snap_resize(tile, blur_height(banner_h, content_h)),
+                    Task::done(Message::PrimeVisibleAppIcons),
+                ])
             } else {
                 coco_log!(
                     "apply_current_query_for_active_mode main(before): query={:?} query_lc={:?} results={}",
@@ -2340,7 +2415,10 @@ fn apply_current_query_for_active_mode(tile: &mut Tile) -> Task<Message> {
                     search_results_scrollable_height(&tile.results)
                         .min(crate::app::MAX_RESULTS_SCROLL_HEIGHT)
                 };
-                mode_switch_snap_resize(tile, blur_height(banner_h, content_h))
+                Task::batch([
+                    mode_switch_snap_resize(tile, blur_height(banner_h, content_h)),
+                    Task::done(Message::PrimeVisibleAppIcons),
+                ])
             }
         }
         _ => Task::none(),

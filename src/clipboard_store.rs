@@ -48,6 +48,8 @@ pub struct ClipboardStore {
     pub entries: Vec<ClipboardEntry>,
     next_id: u64,
     max_entries: usize,
+    max_image_entries: usize,
+    max_image_total_bytes: usize,
 }
 
 impl ClipboardStore {
@@ -58,6 +60,8 @@ impl ClipboardStore {
             entries: Vec::new(),
             next_id: 1,
             max_entries: 500,
+            max_image_entries: 24,
+            max_image_total_bytes: 64 * 1024 * 1024,
         };
 
         if let Ok(data) = fs::read_to_string(&path) {
@@ -248,6 +252,12 @@ impl ClipboardStore {
                 break; // All pinned, can't trim
             }
         }
+
+        trim_images_by_budget(
+            &mut self.entries,
+            self.max_image_entries,
+            self.max_image_total_bytes,
+        );
     }
 }
 
@@ -333,6 +343,104 @@ fn compute_pinyin(s: &str) -> String {
         }
     }
     full
+}
+
+fn clipboard_image_bytes(content: &ClipBoardContentType) -> usize {
+    match content {
+        ClipBoardContentType::Image(img) => img.bytes.len(),
+        ClipBoardContentType::Text(_) => 0,
+    }
+}
+
+fn trim_images_by_budget(
+    entries: &mut Vec<ClipboardEntry>,
+    max_image_entries: usize,
+    max_image_total_bytes: usize,
+) {
+    let mut image_count = entries
+        .iter()
+        .filter(|entry| matches!(entry.content, ClipBoardContentType::Image(_)))
+        .count();
+    let mut image_total_bytes: usize = entries
+        .iter()
+        .map(|entry| clipboard_image_bytes(&entry.content))
+        .sum();
+
+    while image_count > max_image_entries || image_total_bytes > max_image_total_bytes {
+        let Some(pos) = entries.iter().rposition(|entry| {
+            !entry.pinned && matches!(entry.content, ClipBoardContentType::Image(_))
+        }) else {
+            break;
+        };
+
+        let removed = entries.remove(pos);
+        image_count -= 1;
+        image_total_bytes =
+            image_total_bytes.saturating_sub(clipboard_image_bytes(&removed.content));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    fn image_entry(id: u64, bytes_len: usize, pinned: bool) -> ClipboardEntry {
+        let width = (bytes_len / 4).max(1);
+        build_entry(
+            id,
+            ClipBoardContentType::Image(arboard::ImageData {
+                width,
+                height: 1,
+                bytes: Cow::Owned(vec![0; width * 4]),
+            }),
+            pinned,
+            Utc::now(),
+        )
+    }
+
+    fn text_entry(id: u64, text: &str) -> ClipboardEntry {
+        build_entry(
+            id,
+            ClipBoardContentType::Text(text.to_string()),
+            false,
+            Utc::now(),
+        )
+    }
+
+    #[test]
+    fn trims_oldest_unpinned_images_when_image_count_exceeded() {
+        let mut entries = vec![
+            image_entry(3, 16, false),
+            image_entry(2, 16, false),
+            image_entry(1, 16, false),
+        ];
+
+        trim_images_by_budget(&mut entries, 2, usize::MAX);
+
+        let remaining_ids = entries.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        assert_eq!(remaining_ids, vec![3, 2]);
+    }
+
+    #[test]
+    fn trims_images_without_touching_text_entries_when_byte_budget_exceeded() {
+        let mut entries = vec![
+            image_entry(4, 64, false),
+            text_entry(3, "keep me"),
+            image_entry(2, 64, false),
+            text_entry(1, "keep me too"),
+        ];
+
+        trim_images_by_budget(&mut entries, usize::MAX, 64);
+
+        let remaining_ids = entries.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        assert_eq!(remaining_ids, vec![4, 3, 1]);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| matches!(entry.content, ClipBoardContentType::Text(_)))
+        );
+    }
 }
 
 /// Format a relative time string from a DateTime<Utc>.

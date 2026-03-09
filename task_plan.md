@@ -79,3 +79,47 @@ Phase 1 → Phase 2 → Phase 3（一次性完成，因为它们紧密关联）
 | `src/app/tile/elm.rs` | new() 去掉 bootstrap，view() 简化 |
 | `src/app/tile.rs` | 去掉动画字段，去掉 anim_tick/permission subscription |
 | `src/app.rs` | 去掉 Tick/WindowHideAnimComplete/SyncBlur 等无用 Message |
+
+---
+
+# Task Plan: 调查 Coco 运行时内存占用过高
+
+## 目标
+
+- 复现并量化 Coco 的实际内存占用
+- 找到主要内存热点是常驻缓存、数据结构无限增长，还是图像/图标解码导致
+- 给出基于证据的根因判断和后续修复方向
+
+## 本轮排查步骤
+
+### Phase 1: 复现与量化 [completed]
+- 确认运行中的 Coco 进程与 RSS
+- 如有必要启动应用并观察稳定态内存
+- 采集 `vmmap` / `ps` / `sample` 等系统证据
+
+### Phase 2: 代码路径排查 [completed]
+- 检查剪贴板历史是否无限增长
+- 检查应用图标、图片解码和缓存逻辑
+- 检查是否存在高频轮询导致对象持续累积
+
+### Phase 3: 交叉验证与结论 [completed]
+- 将系统层证据与代码实现对照
+- 输出最可能根因、次要因素与修复建议
+
+### Phase 4: 实施运行时内存修复 [completed]
+- 新增内存修复设计文档与实施计划
+- `.icns` 运行时解码改为目标尺寸选择 + 下采样
+- 已安装 app icon 改为可见结果懒加载 + 小缓存
+- 剪贴板图片新增数量/总字节预算
+
+### Phase 5: 验证与安装 [completed]
+- `cargo fmt`
+- `cargo test`
+- 重新构建、签名并安装到 `/Applications/Coco.app`
+- 复测新进程内存占用
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| `session-catchup.py` 路径不存在 | 1 | 直接读取现有 `task_plan.md` / `findings.md` / `progress.md` 继续排查 |

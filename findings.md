@@ -77,3 +77,123 @@
 | `src/app/tile/elm.rs:169-175` | view | 剪贴板视图集成 |
 | `src/app/apps.rs:132-205` | render | 行渲染（需要改造） |
 | `src/commands.rs:132-139` | CopyToClipboard | 复制执行 |
+
+---
+
+# Coco 内存排查发现
+
+## 待验证假设
+
+- 剪贴板历史仅内存保存且无容量限制，长时间运行可能持续推高内存
+- 若剪贴板中包含图片，`ImageData<'static>` 可能把解码后的像素数据长期留在内存
+- 应用列表/图标加载路径可能一次性把大量图标解码进内存并长期缓存
+
+## 第一批证据
+
+- 当前运行进程为 `/Applications/Coco.app/Contents/MacOS/coco`，PID `41315`
+- 代码搜索显示以下高风险路径同时存在：
+  - `src/clipboard.rs` 使用 `ImageData<'static>` 保存图片剪贴板内容
+  - `src/app/tile.rs` / `src/app/tile/update.rs` 仍有剪贴板订阅与动画轮询
+  - `src/app/tile/elm.rs` 初始化时调用 `get_installed_apps(store_icons)`
+  - `src/platform/macos/discovery.rs` / `src/platform/macos/mod.rs` 会为应用列表和运行中应用加载 icon
+
+## 当前判断
+
+- 目前最可疑的不是单点泄漏，而是多处“长期常驻缓存”叠加：
+  - 已安装应用 icon 索引
+  - 运行中应用 icon
+  - 剪贴板历史内容，尤其图片
+
+## 系统层证据
+
+- `ps` 显示 PID `41315` 的 RSS 约为 `2683104 KB`（约 `2.56 GB`）
+- `top` 显示同一进程常驻内存约 `2060 MB`
+- `vmmap` 显示：
+  - `Physical footprint: 2.0G`
+  - `Physical footprint (peak): 2.8G`
+  - `mapped file: 1.2G / resident 467.3M`
+  - `CG image: 160.5M`
+  - `Image IO: 160.4M`
+  - `MALLOC_LARGE: 90.7M`
+  - `MALLOC_SMALL: 131.8M`
+
+## 代码层证据
+
+- `src/app/tile/elm.rs`
+  - `new()` 启动阶段直接执行 `get_installed_apps(store_icons)`，不是懒加载
+- `src/platform/macos/discovery.rs`
+  - `get_installed_apps()` 会遍历 Launch Services 返回的所有 app
+  - `query_app()` 在 `store_icons = true` 时为每个 app 尝试加载 icon
+  - icon 优先 `.icns`，失败后回退到 `NSWorkspace.iconForFile()`，后者会触发更重的系统图标解码路径
+- `src/platform/macos/mod.rs`
+  - `get_running_apps(store_icons)` 也会为运行中 app 再次取 icon
+- `src/app/tile.rs`
+  - `handle_clipboard_history()` 以 `10ms` 轮询系统剪贴板
+  - 图片内容直接封装为 `ClipBoardContentType::Image(a)` 并发送
+- `src/clipboard.rs`
+  - 图片以 `ImageData<'static>` 常驻在 Rust 侧内存
+- `src/clipboard_store.rs`
+  - 当前 `max_entries = 500`
+  - 但 `save()` 只持久化文本；图片不会落盘，意味着图片历史全靠内存保留直到被 trim
+
+## 中间结论
+
+- 当前 2GB 级别占用和 `vmmap` 的分布更像“图像/icon 资源被大量解码并长期持有”，不是普通字符串或小对象堆积
+- 剪贴板图片是第二热点，因为它们以原始字节常驻内存；但如果用户没有频繁复制大图，单靠它通常很难解释到 2GB
+- 启动即全量 icon 预加载是目前最像主因的一条路径
+
+## 更强证据：图标解码链路
+
+- `src/utils.rs`
+  - `icon_from_workspace()` 已经做了 128px 限制，说明作者自己也知道“直接解码大图标会很重”
+  - 但 `handle_from_icns()` 仍然 `max_by_key(width * height)` 选取 **最大的** icon layer，并直接 `Handle::from_rgba(...)`
+  - 这意味着 `.icns` 快路径会把 512px / 1024px 图标完整展开为 RGBA 常驻内存
+- `src/platform/macos/discovery.rs`
+  - `query_app()` 的优先顺序是先走 `.icns` 快路径，再 fallback 到 `NSWorkspace`
+  - 所以大量普通 app 会先命中这个“解最大图标”的路径
+- `heap 41315`
+  - `NSBitmapImageRep: 863`
+  - `ISImageDescriptor: 832`
+  - `NSISIconImageRep: 832`
+  - `CGImage: 497`
+  - 这说明进程内确实持有了大批图标位图对象，而不是只有少量 UI 资源
+
+## 进一步判断
+
+- 最可能的主因是：
+  - 启动时全量扫描已安装应用
+  - 对每个应用预加载 icon
+  - `.icns` 路径还会优先解码最大分辨率图层
+- 次要放大因素是：
+  - `NSWorkspace` / IconServices 映射出的图标缓存文件很多，`mapped file` 常驻高
+  - 剪贴板图片历史和 10ms 轮询会进一步增加内存压力，但更像“次要叠加项”
+
+## 已实施修复
+
+- `src/utils.rs`
+  - `.icns` 运行时解码不再取最大图层
+  - 改为选择最接近 `128px` 的图层，并在必要时下采样到目标尺寸
+  - 新增统一的 app bundle icon 加载函数
+- `src/app/tile/elm.rs`
+  - 启动时不再预加载 installed apps 的 icon
+- `src/app/tile/update.rs`
+  - 新增当前可见结果 icon 懒加载
+  - 增加 icon cache 和 in-flight 去重
+  - 零查询、搜索结果、焦点移动都会按需补图标
+- `src/clipboard_store.rs`
+  - 图片历史新增单独预算：
+    - 最多 `24` 张图片
+    - 总图片字节最多 `64MB`
+  - 优先裁剪最旧的非置顶图片
+
+## 修复后验证
+
+- `cargo test` 通过：`101 passed`
+- 重新安装后的新进程观测：
+  - 启动约 6 秒：RSS `130976 KB`，`top` 常驻约 `89MB`
+  - 启动约 23 秒：RSS `117296 KB`，`top` 常驻约 `78MB`
+
+## 结果判断
+
+- 修复后已从原先的约 `2.0G - 2.6G` 常驻占用，降到约 `80MB - 130MB`
+- 这基本确认主因就是“全量 icon 预加载 + 大尺寸图层解码”，不是传统意义上的堆泄漏

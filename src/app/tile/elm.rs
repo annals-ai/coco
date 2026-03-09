@@ -55,9 +55,7 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
 
     crate::currency_conversion::spawn_rate_updater();
 
-    let store_icons = config.theme.show_icons;
-
-    let mut options = get_installed_apps(store_icons);
+    let mut options = get_installed_apps(false);
 
     options.extend(config.shells.iter().map(|x| x.to_app()));
     options.extend(App::basic_apps());
@@ -108,6 +106,8 @@ pub fn new(hotkey: HotKey, config: &Config) -> (Tile, Task<Message>) {
             missing_paste_permission: false,
             permissions_ok: false,
             zero_query_cache: Vec::new(),
+            icon_cache: std::collections::HashMap::new(),
+            pending_icon_paths: std::collections::HashSet::new(),
             show_actions: false,
             actions: Vec::new(),
             action_focus_id: 0,

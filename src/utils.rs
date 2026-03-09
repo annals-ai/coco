@@ -1,13 +1,20 @@
 //! This has all the utility functions that Coco uses
-use std::{fs::File, io::Write, path::Path, process::exit, thread};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process::exit,
+    thread,
+};
 
 use iced::widget::image::Handle;
-use icns::IconFamily;
-use image::RgbaImage;
+use icns::{IconFamily, IconType};
+use image::{RgbaImage, imageops::FilterType};
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapFormat, NSBitmapImageRep, NSImageRep, NSWorkspace};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSString, NSURL};
+use plist::Value;
 
 const ICON_DECODE_TARGET_PX: u32 = 128;
 
@@ -33,28 +40,36 @@ pub(crate) fn log_error_and_exit(msg: &str) -> ! {
 pub(crate) fn handle_from_icns(path: &Path) -> Option<Handle> {
     let data = std::fs::read(path).ok()?;
     let family = IconFamily::read(std::io::Cursor::new(&data)).ok()?;
-
-    let icon_type = family
-        .available_icons()
-        .into_iter()
-        .filter(|t| !t.is_mask())
-        .max_by_key(|t| {
-            let w = t.pixel_width() as u64;
-            let h = t.pixel_height() as u64;
-            w * h
-        })?;
+    let icon_type = pick_best_icns_icon_type(&family)?;
 
     let icon = family.get_icon_with_type(icon_type).ok()?;
-    let image = RgbaImage::from_raw(
+    let mut image = RgbaImage::from_raw(
         icon.width() as u32,
         icon.height() as u32,
         icon.data().to_vec(),
     )?;
+    if image.width() > ICON_DECODE_TARGET_PX || image.height() > ICON_DECODE_TARGET_PX {
+        image = image::imageops::resize(
+            &image,
+            ICON_DECODE_TARGET_PX.min(image.width()),
+            ICON_DECODE_TARGET_PX.min(image.height()),
+            FilterType::Triangle,
+        );
+    }
     Some(Handle::from_rgba(
         image.width(),
         image.height(),
         image.into_raw(),
     ))
+}
+
+/// Load the icon for a macOS app bundle, preferring the bundle's `.icns`
+/// resource and falling back to `NSWorkspace` for asset-catalog icons.
+pub(crate) fn icon_from_app_bundle(app_path: &Path) -> Option<Handle> {
+    icns_path_from_bundle(app_path)
+        .as_deref()
+        .and_then(handle_from_icns)
+        .or_else(|| icon_from_workspace(app_path))
 }
 
 /// Load an application icon via NSWorkspace, which supports all icon formats
@@ -211,6 +226,56 @@ fn pick_best_bitmap_rep(
         }
     }
     best_ge_target.or(best_under_target).map(|(_, b)| b)
+}
+
+fn pick_best_icns_icon_type(family: &IconFamily) -> Option<IconType> {
+    let mut best_ge_target: Option<(u64, IconType)> = None;
+    let mut best_under_target: Option<(u64, IconType)> = None;
+
+    for icon_type in family
+        .available_icons()
+        .into_iter()
+        .filter(|t| !t.is_mask())
+    {
+        let width = icon_type.pixel_width() as u32;
+        let height = icon_type.pixel_height() as u32;
+        if width == 0 || height == 0 {
+            continue;
+        }
+
+        let area = width as u64 * height as u64;
+        if width >= ICON_DECODE_TARGET_PX && height >= ICON_DECODE_TARGET_PX {
+            let replace = best_ge_target
+                .as_ref()
+                .is_none_or(|(best_area, _)| area < *best_area);
+            if replace {
+                best_ge_target = Some((area, icon_type));
+            }
+        } else {
+            let replace = best_under_target
+                .as_ref()
+                .is_none_or(|(best_area, _)| area > *best_area);
+            if replace {
+                best_under_target = Some((area, icon_type));
+            }
+        }
+    }
+
+    best_ge_target
+        .or(best_under_target)
+        .map(|(_, icon_type)| icon_type)
+}
+
+fn icns_path_from_bundle(app_path: &Path) -> Option<PathBuf> {
+    let info_plist = app_path.join("Contents/Info.plist");
+    let value = Value::from_file(info_plist).ok()?;
+    let dict = value.as_dictionary()?;
+    let icon_name = dict.get("CFBundleIconFile")?.as_string()?;
+    let mut icon_path = app_path.join("Contents/Resources").join(icon_name);
+    if icon_path.extension().is_none() {
+        icon_path.set_extension("icns");
+    }
+    icon_path.exists().then_some(icon_path)
 }
 
 /// Convert IEEE 754 half-precision float (16-bit) to f32.

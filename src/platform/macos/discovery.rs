@@ -27,7 +27,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator as _};
 use crate::{
     app::apps::{App, AppCommand},
     commands::Function,
-    utils::{handle_from_icns, icon_from_workspace, log_error},
+    utils::{icon_from_app_bundle, log_error},
 };
 
 use super::super::cross;
@@ -239,21 +239,7 @@ fn query_app(url: impl AsRef<NSURL>, store_icons: bool) -> Option<App> {
                 .map(|stem| stem.to_string_lossy().into_owned())
         })?;
 
-    let icons = store_icons
-        .then(|| {
-            // Fast path: try .icns file first (no TIFF overhead).
-            get_string(ns_string!("CFBundleIconFile"))
-                .and_then(|icon| {
-                    let mut icon_path = path.join("Contents/Resources").join(&icon);
-                    if icon_path.extension().is_none() {
-                        icon_path.set_extension("icns");
-                    }
-                    handle_from_icns(&icon_path)
-                })
-                // Slow fallback: NSWorkspace (for apps with only Assets.car icons).
-                .or_else(|| icon_from_workspace(&path))
-        })
-        .flatten();
+    let icons = store_icons.then(|| icon_from_app_bundle(&path)).flatten();
 
     let localized_name = read_zh_hans_display_name(&path).filter(|ln| ln != &name);
 

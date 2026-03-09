@@ -18,7 +18,6 @@ use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
 use iced::futures::SinkExt;
 use iced::futures::channel::mpsc::{Sender, channel};
-use iced::keyboard::Modifiers;
 use iced::{
     Subscription, Theme, futures,
     keyboard::{self, key::Named},
@@ -33,6 +32,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tray_icon::TrayIcon;
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,6 +136,8 @@ pub struct Tile {
     pub missing_paste_permission: bool,
     // Zero-query cache (built once on window open, reused on empty query)
     pub zero_query_cache: Vec<App>,
+    pub icon_cache: HashMap<String, iced::widget::image::Handle>,
+    pub pending_icon_paths: HashSet<String>,
     // Actions overlay (⌘K)
     pub show_actions: bool,
     pub actions: Vec<crate::app::actions::ActionItem>,
