@@ -197,3 +197,88 @@
 
 - 修复后已从原先的约 `2.0G - 2.6G` 常驻占用，降到约 `80MB - 130MB`
 - 这基本确认主因就是“全量 icon 预加载 + 大尺寸图层解码”，不是传统意义上的堆泄漏
+
+---
+
+# Async Icon Placeholder Follow-up
+
+## 新问题
+
+- 纯异步 icon 加载下，某些结果项会先以弱占位态渲染
+- 由于缓存回填发生在后续消息里，已见过的结果也可能先闪一下占位，再切成真实 icon
+
+## 根因
+
+- `rebuild_results_for_current_query()` 重建搜索结果后，没有立刻把 `icon_cache` 里的已知 icon 同步回填
+- `OpenWindow` 重建 zero-query 列表后，同样没有立刻用 `icon_cache` 补回已缓存 icon
+- 当前 `None` icon 的 fallback 过于轻，视觉上容易像“空白”
+
+## 已实施修复
+
+- 在结果重建后立即执行缓存 icon 回填，减少已缓存结果的闪烁
+- 在打开窗口重建 zero-query 后立即回填缓存 icon
+- 将 pending icon 的 fallback 改成稳定的字母 badge，而不是几乎空白的弱占位态
+
+## 剩余抖动根因
+
+- 当前可见 icon 仍然是“每个 icon 单独异步完成、每完成一个就发一条消息”
+- `Message::AppIconLoaded(...)` 会反复更新 `tile.results` 和 `tile.zero_query_cache`
+- 同一屏里多个 icon 接连完成时，列表会短时间连续重绘，因此用户仍会感受到抖动
+
+## 本轮修复
+
+- 将“逐个 icon 回填”改为“当前可见窗口批量回填”
+- 同一批次 icon 统一通过一次 `Message::AppIconsLoaded(...)` 写入缓存并更新列表
+- 保留异步加载、缓存命中即时回填和字母 badge placeholder，不回退到首屏同步解码
+
+## 本轮自测结论
+
+- 新增回归测试，直接验证 `Message::AppIconsLoaded(...)` 前后：
+  - 结果顺序不变
+  - `focus_id` 不变
+  - 搜索结果高度不变
+  - `target_window_height` / `target_blur_height` / `pending_window_height` 不变
+- 这说明剩余“抖动”已经不是数据层或窗口 resize 在跳，而更像 icon slot 的视觉替换本身在闪
+
+## 继续修复
+
+- 去掉字母 badge placeholder，改成和真实 icon 共用同一个固定 slot
+- 未加载时显示统一的单色 app glyph；加载完成后仅替换 slot 内部内容
+- 这样可以避免 badge/image 两种完全不同的视觉结构来回切换
+
+## 再进一步
+
+- 将 icon slot 改为分层结构：
+  - 底层 placeholder 常驻
+  - 顶层真实 icon 到位后覆盖
+- 这样即使 icon 在异步时刻完成，整行 widget 树和 slot 结构也不需要在“无 icon / 有 icon”之间切换
+- 当前这条路径更接近真正的“只换像素，不换结构”
+
+## 左侧空隙来源
+
+- 当前结果行左侧缩进不是单一 margin，而是以下几段叠加：
+  - `RESULT_LIST_PADDING_X`
+  - `RESULT_ROW_PADDING_X`
+  - 固定 `RESULT_ICON_SLOT`
+  - `RESULT_ROW_CONTENT_GAP`
+- 这会让结果文字起点明显比搜索框更靠右，所以视觉上会觉得左边“空了一大块”
+
+## 本轮调整
+
+- 收紧列表横向 padding、行内 padding、icon slot 和 icon/text gap
+- 让结果行的文字起点更靠近搜索框的视觉起点
+
+## 为什么上一轮没生效
+
+- 左侧大空隙的真正主因不是常量，而是 `src/app/apps.rs` 里的 `app_icon_slot()`
+- 最外层 icon slot 容器调用了 `.center_x(Fill)` / `.center_y(Fill)`
+- 在 `iced` 里，`center_x(width)` 会先执行 `width(width)`；传入 `Fill` 等于把 icon slot 自身宽度直接改成了 `Fill`
+- 结果是整行左半大块空间先分给 icon 容器，图标再在这块空间里居中，看起来就像左边一直空了一大截
+
+## 本轮自测
+
+- 直接阅读 `iced_widget::container::center_x()` 实现，确认它会修改容器宽度
+- 查看实际运行日志 `/Users/kcsx/coco_debug.log`，确认 Coco 的打开/渲染链路正常，问题不在窗口 resize
+- 新增回归测试：
+  - `app_icon_slot_keeps_fixed_size_hint`
+  - 断言 icon slot 的 `size_hint()` 仍然是固定 `RESULT_ICON_SLOT`，不再是 `Fill`

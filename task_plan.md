@@ -118,6 +118,42 @@ Phase 1 → Phase 2 → Phase 3（一次性完成，因为它们紧密关联）
 - 重新构建、签名并安装到 `/Applications/Coco.app`
 - 复测新进程内存占用
 
+### Phase 6: 异步 icon 占位态稳定化 [completed]
+- 为 async icon loading 新增短设计文档和实施计划
+- 结果重建后同步回填已缓存 icon
+- 未加载 icon 时显示稳定 placeholder badge
+- 重新测试并安装
+
+### Phase 7: 异步 icon 批量回填防抖 [completed]
+- 确认剩余抖动来自逐个 icon 完成时的连续重绘
+- 将可见 icon 加载改为单批次异步任务
+- 批量消息统一更新 cache 和结果列表
+- 重新测试并安装
+
+### Phase 8: icon slot 视觉稳定化 [completed]
+- 新增状态稳定性回归测试，验证 icon 回填不改变结果顺序、focus 和窗口高度缓存
+- 将 placeholder 与真实 icon 收敛到同一个固定 slot
+- 降低未加载态和真实 icon 之间的视觉跳变
+- 重新测试并安装
+
+### Phase 9: 分层 icon slot 防闪 [completed]
+- 根据实际截图继续收敛 icon 行为
+- 将 icon slot 改为底层 placeholder 常驻、顶层真实 icon 覆盖
+- 尽量做到只更新像素层，不切换行内结构
+- 重新测试并安装
+
+### Phase 10: 收紧左侧 gutter [completed]
+- 根据截图定位结果行左侧空隙的具体来源
+- 收紧列表和行内横向预留
+- 让结果行起点更贴近搜索框
+- 重新测试并安装
+
+### Phase 11: 修正 icon slot 被错误拉伸 [completed]
+- 自测 `iced` 的 `center_x(Fill)` / `center_y(Fill)` 真实语义
+- 确认 icon slot 被错误设置成 `Fill`
+- 改为固定尺寸 + 对齐
+- 新增回归测试并重新安装
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |

@@ -117,6 +117,7 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
             // Always refresh zero-query cache on open
             let zq = build_zero_query_results_inner();
             tile.zero_query_cache = zq;
+            apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
             // Compute target height for content
             let banner_h = permission_banner_height(tile);
             let target_h = if tile.page == Page::ClipboardHistory && tile.clipboard_store.len() > 0
@@ -1197,13 +1198,16 @@ pub fn handle_update(tile: &mut Tile, message: Message) -> Task<Message> {
 
         Message::PrimeVisibleAppIcons => prime_visible_app_icons(tile),
 
-        Message::AppIconLoaded(bundle_path, icon) => {
-            tile.pending_icon_paths.remove(&bundle_path);
-            if let Some(icon) = icon {
-                tile.icon_cache.insert(bundle_path, icon);
-                apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
-                apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
+        Message::AppIconsLoaded(icon_batch) => {
+            for (bundle_path, icon) in icon_batch {
+                tile.pending_icon_paths.remove(&bundle_path);
+                if let Some(icon) = icon {
+                    tile.icon_cache.insert(bundle_path, icon);
+                }
             }
+
+            apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
+            apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
             Task::none()
         }
 
@@ -1851,7 +1855,7 @@ fn prime_visible_app_icons(tile: &mut Tile) -> Task<Message> {
     apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
     apply_cached_icons_to_apps(&mut tile.zero_query_cache, &tile.icon_cache);
 
-    let mut tasks = Vec::new();
+    let mut requested_paths = Vec::new();
     for bundle_path in visible_icon_paths(&tile.results, tile.focus_id as usize) {
         if tile.icon_cache.contains_key(&bundle_path)
             || !tile.pending_icon_paths.insert(bundle_path.clone())
@@ -1859,21 +1863,35 @@ fn prime_visible_app_icons(tile: &mut Tile) -> Task<Message> {
             continue;
         }
 
-        let path_for_task = bundle_path.clone();
-        tasks.push(Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    crate::utils::icon_from_app_bundle(Path::new(&path_for_task))
-                })
-                .await
-                .ok()
-                .flatten()
-            },
-            move |icon| Message::AppIconLoaded(bundle_path, icon),
-        ));
+        requested_paths.push(bundle_path);
     }
 
-    Task::batch(tasks)
+    if requested_paths.is_empty() {
+        return Task::none();
+    }
+
+    let fallback_paths = requested_paths.clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                requested_paths
+                    .into_iter()
+                    .map(|bundle_path| {
+                        let icon = crate::utils::icon_from_app_bundle(Path::new(&bundle_path));
+                        (bundle_path, icon)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_else(|_| {
+                fallback_paths
+                    .into_iter()
+                    .map(|bundle_path| (bundle_path, None))
+                    .collect()
+            })
+        },
+        Message::AppIconsLoaded,
+    )
 }
 
 fn apply_cached_icons_to_apps(
@@ -2208,10 +2226,21 @@ fn close_clipboard_preview(tile: &mut Tile) {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_transfers_focus, search_results_scrollable_height};
-    use crate::app::MAIN_SEARCH_RESULTS_BOTTOM_SPACING;
+    use super::{command_transfers_focus, handle_update, search_results_scrollable_height};
+    use crate::agent::types::AgentStatus;
     use crate::app::apps::{App, AppCommand};
+    use crate::app::tile::Tile;
+    use crate::app::{MAIN_SEARCH_RESULTS_BOTTOM_SPACING, Message, Page};
+    use crate::clipboard_store::ClipboardStore;
     use crate::commands::Function;
+    use crate::config::Config;
+    use crate::favorite_store::FavoriteStore;
+    use crate::search::AppIndex;
+    use global_hotkey::hotkey::HotKey;
+    use iced::widget::image::Handle;
+    use nucleo_matcher::{Config as MatcherConfig, Matcher};
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
 
     fn make_app(name: &str) -> App {
         App {
@@ -2225,6 +2254,82 @@ mod tests {
             bundle_path: None,
             bundle_id: None,
             pid: None,
+        }
+    }
+
+    fn make_bundled_app(name: &str, bundle_path: &str) -> App {
+        let mut app = make_app(name);
+        app.bundle_path = Some(bundle_path.to_string());
+        app
+    }
+
+    fn dummy_icon() -> Handle {
+        Handle::from_rgba(1, 1, vec![255, 255, 255, 255])
+    }
+
+    fn make_tile(results: Vec<App>, query: &str) -> Tile {
+        let config = Config::default();
+        let hotkey: HotKey = config
+            .toggle_hotkey
+            .parse()
+            .expect("default hotkey should parse");
+
+        Tile {
+            theme: config.theme.clone().into(),
+            focus_id: 1,
+            query: query.to_string(),
+            query_lc: query.to_lowercase(),
+            results: results.clone(),
+            options: AppIndex::from_apps(Vec::new()),
+            emoji_apps: AppIndex::from_apps(Vec::new()),
+            visible: true,
+            focused: true,
+            frontmost: None,
+            config,
+            hotkey,
+            clipboard_hotkey: None,
+            clipboard_store: ClipboardStore::load(),
+            clipboard_filtered: Vec::new(),
+            clipboard_quick_preview_open: false,
+            tray_icon: None,
+            sender: None,
+            page: Page::Main,
+            fuzzy_matcher: RefCell::new(Matcher::new(MatcherConfig::DEFAULT)),
+            agent_sessions: Vec::new(),
+            agent_filtered: Vec::new(),
+            agent_window_id: None,
+            agent_session_id: None,
+            agent_messages: Vec::new(),
+            agent_input: String::new(),
+            agent_status: AgentStatus::Idle,
+            agent_markdown: iced::widget::markdown::Content::new(),
+            permissions_ok: true,
+            missing_accessibility: false,
+            missing_input_monitoring: false,
+            missing_paste_permission: false,
+            zero_query_cache: results,
+            icon_cache: HashMap::new(),
+            pending_icon_paths: HashSet::new(),
+            show_actions: false,
+            actions: Vec::new(),
+            action_focus_id: 0,
+            action_target_name: String::new(),
+            window_list: Vec::new(),
+            main_window_id: None,
+            target_blur_height: 312.0,
+            target_window_height: 356.0,
+            pending_window_height: Some(344.0),
+            window_resize_token: 17,
+            show_animating: false,
+            hide_animating: false,
+            last_hotkey_time: None,
+            last_query_edit_time: None,
+            suppress_row_hover_focus: false,
+            pending_paste_after_hide: false,
+            calculator_history: Vec::new(),
+            favorite_store: FavoriteStore::load(),
+            favorite_filtered: Vec::new(),
+            editing_favorite_title: None,
         }
     }
 
@@ -2272,6 +2377,74 @@ mod tests {
             + MAIN_SEARCH_RESULTS_BOTTOM_SPACING;
 
         assert_eq!(search_results_scrollable_height(&results), expected);
+    }
+
+    #[test]
+    fn app_icon_batch_keeps_search_state_stable() {
+        let results = vec![
+            make_bundled_app("Safari", "/Applications/Safari.app"),
+            make_bundled_app("Notes", "/Applications/Notes.app"),
+            make_bundled_app("Calendar", "/Applications/Calendar.app"),
+        ];
+        let mut tile = make_tile(results, "sa");
+
+        let before_names = tile
+            .results
+            .iter()
+            .map(|app| app.name.clone())
+            .collect::<Vec<_>>();
+        let before_paths = tile
+            .results
+            .iter()
+            .map(|app| app.bundle_path.clone())
+            .collect::<Vec<_>>();
+        let before_height = search_results_scrollable_height(&tile.results);
+        let before_focus = tile.focus_id;
+        let before_blur_height = tile.target_blur_height;
+        let before_window_height = tile.target_window_height;
+        let before_pending = tile.pending_window_height;
+        let before_resize_token = tile.window_resize_token;
+
+        let _ = handle_update(
+            &mut tile,
+            Message::AppIconsLoaded(vec![
+                ("/Applications/Safari.app".to_string(), Some(dummy_icon())),
+                ("/Applications/Notes.app".to_string(), Some(dummy_icon())),
+            ]),
+        );
+
+        assert_eq!(
+            tile.results
+                .iter()
+                .map(|app| app.name.clone())
+                .collect::<Vec<_>>(),
+            before_names
+        );
+        assert_eq!(
+            tile.results
+                .iter()
+                .map(|app| app.bundle_path.clone())
+                .collect::<Vec<_>>(),
+            before_paths
+        );
+        assert_eq!(
+            search_results_scrollable_height(&tile.results),
+            before_height
+        );
+        assert_eq!(tile.focus_id, before_focus);
+        assert_eq!(tile.target_blur_height, before_blur_height);
+        assert_eq!(tile.target_window_height, before_window_height);
+        assert_eq!(tile.pending_window_height, before_pending);
+        assert_eq!(tile.window_resize_token, before_resize_token);
+
+        assert!(tile.icon_cache.contains_key("/Applications/Safari.app"));
+        assert!(tile.icon_cache.contains_key("/Applications/Notes.app"));
+        assert!(tile.results[0].icons.is_some());
+        assert!(tile.results[1].icons.is_some());
+        assert!(tile.results[2].icons.is_none());
+        assert!(tile.zero_query_cache[0].icons.is_some());
+        assert!(tile.zero_query_cache[1].icons.is_some());
+        assert!(tile.zero_query_cache[2].icons.is_none());
     }
 }
 
@@ -2441,6 +2614,7 @@ fn rebuild_results_for_current_query(tile: &mut Tile) {
         coco_log!("rebuild_results(calc-preferred): skip app search");
     } else {
         tile.handle_search_query_changed();
+        apply_cached_icons_to_apps(&mut tile.results, &tile.icon_cache);
         coco_log!(
             "rebuild_results(after app search): results={}",
             tile.results.len()

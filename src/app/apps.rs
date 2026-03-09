@@ -5,9 +5,10 @@ use std::path::Path;
 
 use iced::{
     Alignment,
+    alignment,
     Length::Fill,
     font::Weight,
-    widget::{Button, Row, Text, container, image, mouse_area, text::Wrapping},
+    widget::{Button, Row, Space, Text, container, image, mouse_area, stack, text::Wrapping},
 };
 
 use crate::{
@@ -230,30 +231,7 @@ impl App {
             .height(RESULT_ROW_CONTENT_HEIGHT);
 
         if theme.show_icons && !is_currency_result && !is_calculator_result {
-            if let Some(icon) = &self.icons {
-                row = row.push(
-                    container(
-                        image(icon.clone())
-                            .height(RESULT_ICON_SIZE)
-                            .width(RESULT_ICON_SIZE),
-                    )
-                    .width(RESULT_ICON_SLOT)
-                    .height(RESULT_ICON_SLOT)
-                    .padding(1),
-                );
-            } else {
-                row = row.push(
-                    container(crate::icons::icon(
-                        crate::icons::APP,
-                        16.0,
-                        theme.text_color(0.55),
-                    ))
-                    .width(RESULT_ICON_SLOT)
-                    .height(RESULT_ICON_SLOT)
-                    .center_x(Fill)
-                    .center_y(Fill),
-                );
-            }
+            row = row.push(app_icon_slot(theme.clone(), self.icons.as_ref()));
         }
         row = row.push(container(text_block).width(Fill));
 
@@ -366,30 +344,7 @@ impl App {
             .height(RESULT_ROW_CONTENT_HEIGHT);
 
         if theme.show_icons {
-            if let Some(icon) = &self.icons {
-                row = row.push(
-                    container(
-                        image(icon.clone())
-                            .height(RESULT_ICON_SIZE)
-                            .width(RESULT_ICON_SIZE),
-                    )
-                    .width(RESULT_ICON_SLOT)
-                    .height(RESULT_ICON_SLOT)
-                    .padding(1),
-                );
-            } else {
-                row = row.push(
-                    container(crate::icons::icon(
-                        crate::icons::APP,
-                        16.0,
-                        theme.text_color(0.55),
-                    ))
-                    .width(RESULT_ICON_SLOT)
-                    .height(RESULT_ICON_SLOT)
-                    .center_x(Fill)
-                    .center_y(Fill),
-                );
-            }
+            row = row.push(app_icon_slot(theme.clone(), self.icons.as_ref()));
         }
         row = row.push(container(text_block).width(Fill));
 
@@ -442,5 +397,66 @@ impl App {
         mouse_area(row_container)
             .on_enter(Message::HoverResult(id_num))
             .into()
+    }
+}
+
+fn app_icon_slot(
+    theme: crate::config::Theme,
+    icon: Option<&iced::widget::image::Handle>,
+) -> iced::Element<'static, Message> {
+    let placeholder = container(crate::icons::icon(
+        crate::icons::APP,
+        18.0,
+        theme.text_color(0.42),
+    ))
+    .width(RESULT_ICON_SIZE)
+    .height(RESULT_ICON_SIZE)
+    .align_x(alignment::Horizontal::Center)
+    .align_y(alignment::Vertical::Center);
+
+    let icon_layer: iced::Element<'static, Message> = if let Some(icon) = icon {
+        container(
+            image(icon.clone())
+                .height(RESULT_ICON_SIZE)
+                .width(RESULT_ICON_SIZE),
+        )
+        .width(RESULT_ICON_SIZE)
+        .height(RESULT_ICON_SIZE)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
+        .into()
+    } else {
+        Space::new()
+            .height(RESULT_ICON_SIZE)
+            .width(RESULT_ICON_SIZE)
+            .into()
+    };
+
+    container(
+        stack([placeholder.into(), icon_layer])
+            .width(RESULT_ICON_SIZE)
+            .height(RESULT_ICON_SIZE),
+    )
+        .width(RESULT_ICON_SLOT)
+        .height(RESULT_ICON_SLOT)
+        .padding(1)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app_icon_slot;
+    use crate::app::RESULT_ICON_SLOT;
+    use iced::Length;
+
+    #[test]
+    fn app_icon_slot_keeps_fixed_size_hint() {
+        let slot = app_icon_slot(crate::config::Theme::default(), None);
+        let size = slot.as_widget().size_hint();
+
+        assert_eq!(size.width, Length::Fixed(RESULT_ICON_SLOT as f32));
+        assert_eq!(size.height, Length::Fixed(RESULT_ICON_SLOT as f32));
     }
 }

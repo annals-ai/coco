@@ -24,14 +24,14 @@ pub const WINDOW_HEIGHT: f32 = 500.;
 
 /// Shared padding for the main results lists (search + zero-query).
 pub const RESULT_LIST_PADDING_Y: u16 = 2;
-pub const RESULT_LIST_PADDING_X: u16 = 6;
+pub const RESULT_LIST_PADDING_X: u16 = 4;
 /// Shared row shell metrics used by both search results and zero-query rows.
 pub const RESULT_ROW_PADDING_Y: u16 = 4;
-pub const RESULT_ROW_PADDING_X: u16 = 12;
+pub const RESULT_ROW_PADDING_X: u16 = 8;
 pub const RESULT_ROW_CONTENT_HEIGHT: u32 = 50;
-pub const RESULT_ROW_CONTENT_GAP: u32 = 16;
-pub const RESULT_ICON_SLOT: u32 = 40;
-pub const RESULT_ICON_SIZE: u32 = 38;
+pub const RESULT_ROW_CONTENT_GAP: u32 = 10;
+pub const RESULT_ICON_SLOT: u32 = 36;
+pub const RESULT_ICON_SIZE: u32 = 34;
 /// Zero-query section header padding is aligned to row container inset.
 pub const ZQ_HEADER_PADDING_Y: u16 = 6;
 pub const ZQ_HEADER_PADDING_X: u16 = RESULT_ROW_PADDING_X;
@@ -121,7 +121,7 @@ pub enum Message {
     CycleLauncherMode { reverse: bool },
     ClipboardHistory(ClipBoardContentType),
     PrimeVisibleAppIcons,
-    AppIconLoaded(String, Option<iced::widget::image::Handle>),
+    AppIconsLoaded(Vec<(String, Option<iced::widget::image::Handle>)>),
     ChangeFocus(ArrowKey),
     ResultPointerMoved(f32),
     ResultPointerExited,
